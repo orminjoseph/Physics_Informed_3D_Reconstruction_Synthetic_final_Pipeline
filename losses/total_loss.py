@@ -1,43 +1,37 @@
 """
-=========================================================
+====================================================================
 Total Loss
-=========================================================
+====================================================================
 
 Physics-Informed 3D Encoder-Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction
 
-Composite objective:
+Composite objective
+-------------------
+    L_total = w_mae * L_MAE
+            + w_physics * L_acoustic
+            + w_uncertainty * L_aleatoric
+            + w_ssim * L_SSIM
 
-    Total Loss =
-        w_mae * MAE
-        + w_physics * Physics Loss
-        + w_uncertainty * Heteroscedastic Aleatoric
-          Uncertainty Loss
-        + w_ssim * SSIM Loss
+The physics term is the acoustic wave-equation residual supplied by
+AcousticWaveEquationLoss. Eikonal, source-condition travel-time, and
+travel-time-supervision terms are deliberately not used in this module.
 
-The physics loss may contain:
+Important physical distinction
+------------------------------
+The acoustic loss requires a time-dependent pressure wavefield
+p(t, z, y, x), not merely a static seismic reconstruction cube.
+The static reconstruction prediction/target remain [B, C, D, H, W].
+The pressure wavefield and source are expected by the acoustic loss
+to be [B, 1, T, D, H, W], and velocity [B, 1, D, H, W], following
+the AcousticWaveEquationLoss implementation.
 
-    - Eikonal equation constraint
-    - Source-condition constraint
-    - Travel-time supervision
-
-The reconstruction loss (MAE) remains the primary
-reconstruction objective.
-
-Input convention:
-
-    [B, C, D, H, W]
-
-where:
-
-    B = batch
-    C = seismic channels
-    D = depth
-    H = crossline
-    W = inline
+The pressure field used by the physics term must be physically
+meaningful and consistently sampled. Do not pass a static reconstruction
+cube as pressure_wavefield.
 
 Author: Ormin Joseph
-=========================================================
+====================================================================
 """
 
 import math
@@ -46,703 +40,285 @@ import torch
 import torch.nn as nn
 
 from losses.mae_loss import MAELoss
-from losses.physics_loss import PhysicsLoss
+from losses.physics_loss import AcousticWaveEquationLoss
 from losses.ssim_loss import SSIMLoss
 from losses.Heteroscedastic_Aleatoric_uncertainty_loss import (
     HeteroscedasticAleatoricUncertaintyLoss,
 )
 
-from utils.config import (
-    LOSS_WEIGHTS,
-    PHYSICS_LOSS_WEIGHTS,
-    SEISMIC_DATA_RANGE,
-)
+from utils.config import LOSS_WEIGHTS, SEISMIC_DATA_RANGE
 
 
 class TotalLoss(nn.Module):
     """
-    Composite loss for the physics-informed 3D seismic
-    reconstruction framework.
+    Composite reconstruction, acoustic-physics, and uncertainty loss.
 
     Parameters
     ----------
     loss_weights : dict, optional
-        Weights for the major loss components:
-
-            {
-                "mae": ...,
-                "physics": ...,
-                "uncertainty": ...,
-                "ssim": ...
-            }
-
-    physics_loss_weights : dict, optional
-        Weights for physics sub-components:
-
-            {
-                "eikonal": ...,
-                "source": ...,
-                "travel_time": ...
-            }
+        Required keys: "mae", "physics", "uncertainty", and "ssim".
+        Defaults to LOSS_WEIGHTS from utils.config.
 
     data_range : float, optional
-        Dynamic range of normalized seismic amplitudes.
-        This is passed to the SSIM loss.
+        Dynamic range passed to SSIMLoss. Defaults to SEISMIC_DATA_RANGE.
 
-    log_variance_min : float, optional
-        Lower bound for predicted log variance.
+    acoustic_loss : AcousticWaveEquationLoss, optional
+        An already-configured acoustic wave-equation loss instance.
+        Supplying the instance avoids duplicating dt/dx/dy/dz settings
+        that belong to the physics-loss module.
 
-    log_variance_max : float, optional
-        Upper bound for predicted log variance.
+    log_variance_min, log_variance_max : float, optional
+        Optional limits passed to the uncertainty-loss module.
     """
 
     def __init__(
         self,
         loss_weights=None,
-        physics_loss_weights=None,
         data_range=None,
+        acoustic_loss=None,
         log_variance_min=None,
         log_variance_max=None,
     ):
         super().__init__()
 
-        # -------------------------------------------------
-        # Use configuration values when explicit values
-        # are not supplied.
-        # -------------------------------------------------
         if loss_weights is None:
             loss_weights = LOSS_WEIGHTS
-
-        if physics_loss_weights is None:
-            physics_loss_weights = PHYSICS_LOSS_WEIGHTS
-
         if data_range is None:
             data_range = SEISMIC_DATA_RANGE
 
-        # -------------------------------------------------
-        # Validate the loss-weight dictionaries.
-        # -------------------------------------------------
         self._validate_weight_dictionary(
             loss_weights,
             required_keys=("mae", "physics", "uncertainty", "ssim"),
             name="loss_weights",
         )
+        self._validate_positive_finite(data_range, "data_range")
 
-        self._validate_weight_dictionary(
-            physics_loss_weights,
-            required_keys=("eikonal", "source", "travel_time"),
-            name="physics_loss_weights",
-        )
-
-        # -------------------------------------------------
-        # Validate seismic data range.
-        # -------------------------------------------------
-        if isinstance(data_range, bool):
-            raise TypeError(
-                "data_range must be a positive finite number."
-            )
-
-        if not isinstance(data_range, (int, float)):
-            raise TypeError(
-                "data_range must be a positive finite number."
-            )
-
-        if not math.isfinite(float(data_range)):
-            raise ValueError(
-                "data_range must be finite."
-            )
-
-        if float(data_range) <= 0.0:
-            raise ValueError(
-                "data_range must be greater than zero."
-            )
-
-        # -------------------------------------------------
-        # Store configuration.
-        # -------------------------------------------------
         self.loss_weights = {
-            key: float(value)
-            for key, value in loss_weights.items()
+            key: float(loss_weights[key])
+            for key in ("mae", "physics", "uncertainty", "ssim")
         }
-
-        self.physics_loss_weights = {
-            key: float(value)
-            for key, value in physics_loss_weights.items()
-        }
-
         self.data_range = float(data_range)
 
-        # -------------------------------------------------
-        # Validate optional log-variance limits.
-        #
-        # These are passed to the uncertainty loss so that
-        # the uncertainty branch uses the same numerical
-        # limits as the project configuration.
-        # -------------------------------------------------
+        if acoustic_loss is not None and not isinstance(
+            acoustic_loss, AcousticWaveEquationLoss
+        ):
+            raise TypeError(
+                "acoustic_loss must be an AcousticWaveEquationLoss instance."
+            )
+        self.acoustic_loss = acoustic_loss
+
         if log_variance_min is not None:
-            if isinstance(log_variance_min, bool):
-                raise TypeError(
-                    "log_variance_min must be numeric."
-                )
-
-            if not isinstance(log_variance_min, (int, float)):
-                raise TypeError(
-                    "log_variance_min must be numeric."
-                )
-
-            if not math.isfinite(float(log_variance_min)):
-                raise ValueError(
-                    "log_variance_min must be finite."
-                )
-
+            self._validate_finite_number(
+                log_variance_min, "log_variance_min"
+            )
         if log_variance_max is not None:
-            if isinstance(log_variance_max, bool):
-                raise TypeError(
-                    "log_variance_max must be numeric."
-                )
-
-            if not isinstance(log_variance_max, (int, float)):
-                raise TypeError(
-                    "log_variance_max must be numeric."
-                )
-
-            if not math.isfinite(float(log_variance_max)):
-                raise ValueError(
-                    "log_variance_max must be finite."
-                )
-
+            self._validate_finite_number(
+                log_variance_max, "log_variance_max"
+            )
         if (
             log_variance_min is not None
             and log_variance_max is not None
             and float(log_variance_min) >= float(log_variance_max)
         ):
             raise ValueError(
-                "log_variance_min must be smaller than "
-                "log_variance_max."
+                "log_variance_min must be smaller than log_variance_max."
             )
 
-        # -------------------------------------------------
-        # Store uncertainty limits when supplied.
-        # They are intentionally optional here because the
-        # uncertainty-loss module itself obtains the
-        # project defaults from config.py.
-        # -------------------------------------------------
-        self.log_variance_min = log_variance_min
-        self.log_variance_max = log_variance_max
-
-        # -------------------------------------------------
-        # Instantiate individual loss functions.
-        # -------------------------------------------------
-        self.mae_loss = MAELoss()
-
-        self.physics_loss = PhysicsLoss(
-            eikonal_weight=self.physics_loss_weights["eikonal"],
-            source_weight=self.physics_loss_weights["source"],
-            travel_time_weight=self.physics_loss_weights["travel_time"],
-        )
-
-        self.ssim_loss = SSIMLoss(
-            data_range=self.data_range
-        )
-
-        # -------------------------------------------------
-        # Instantiate the heteroscedastic aleatoric
-        # uncertainty loss.
-        #
-        # Explicit bounds are supplied only when the caller
-        # provides them. Otherwise the uncertainty-loss
-        # module uses the centralized project configuration.
-        # -------------------------------------------------
         uncertainty_kwargs = {}
-
         if log_variance_min is not None:
-            uncertainty_kwargs["log_variance_min"] = (
-                float(log_variance_min)
-            )
-
+            uncertainty_kwargs["log_variance_min"] = float(log_variance_min)
         if log_variance_max is not None:
-            uncertainty_kwargs["log_variance_max"] = (
-                float(log_variance_max)
-            )
+            uncertainty_kwargs["log_variance_max"] = float(log_variance_max)
 
-        self.uncertainty_loss = (
-            HeteroscedasticAleatoricUncertaintyLoss(
-                **uncertainty_kwargs
-            )
+        self.mae_loss = MAELoss()
+        self.ssim_loss = SSIMLoss(data_range=self.data_range)
+        self.uncertainty_loss = HeteroscedasticAleatoricUncertaintyLoss(
+            **uncertainty_kwargs
         )
-
-    # =====================================================
-    # Validation helpers
-    # =====================================================
 
     @staticmethod
-    def _validate_weight_dictionary(
-        weights,
-        required_keys,
-        name,
-    ):
-        """
-        Validate a loss-weight dictionary.
-        """
+    def _validate_finite_number(value, name):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must be a numeric value.")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{name} must be finite.")
 
+    @classmethod
+    def _validate_positive_finite(cls, value, name):
+        cls._validate_finite_number(value, name)
+        if float(value) <= 0:
+            raise ValueError(f"{name} must be greater than zero.")
+
+    @classmethod
+    def _validate_weight_dictionary(cls, weights, required_keys, name):
         if not isinstance(weights, dict):
-            raise TypeError(
-                f"{name} must be a dictionary."
-            )
+            raise TypeError(f"{name} must be a dictionary.")
 
-        missing_keys = [
-            key for key in required_keys
-            if key not in weights
-        ]
-
-        if missing_keys:
-            raise KeyError(
-                f"{name} is missing required keys: "
-                f"{missing_keys}"
-            )
+        missing = [key for key in required_keys if key not in weights]
+        if missing:
+            raise KeyError(f"{name} is missing required keys: {missing}")
 
         for key in required_keys:
-
             value = weights[key]
-
-            if isinstance(value, bool):
-                raise TypeError(
-                    f"{name}['{key}'] must be numeric."
-                )
-
-            if not isinstance(value, (int, float)):
-                raise TypeError(
-                    f"{name}['{key}'] must be numeric."
-                )
-
-            if not math.isfinite(float(value)):
-                raise ValueError(
-                    f"{name}['{key}'] must be finite."
-                )
-
-            if float(value) < 0.0:
-                raise ValueError(
-                    f"{name}['{key}'] cannot be negative."
-                )
+            cls._validate_finite_number(value, f"{name}['{key}']")
+            if float(value) < 0:
+                raise ValueError(f"{name}['{key}'] cannot be negative.")
 
     @staticmethod
-    def _validate_tensor(
-        tensor,
-        name,
-    ):
-        """
-        Validate that an input is a finite PyTorch tensor.
-        """
-
+    def _validate_floating_tensor(tensor, name, ndim=None):
         if not isinstance(tensor, torch.Tensor):
-            raise TypeError(
-                f"{name} must be a torch.Tensor."
-            )
-
+            raise TypeError(f"{name} must be a torch.Tensor.")
         if not torch.is_floating_point(tensor):
-            raise TypeError(
-                f"{name} must be a floating-point tensor."
+            raise TypeError(f"{name} must be a floating-point tensor.")
+        if ndim is not None and tensor.ndim != ndim:
+            raise ValueError(
+                f"{name} must be {ndim}D; received shape {tuple(tensor.shape)}."
             )
-
         if not torch.isfinite(tensor).all():
-            raise ValueError(
-                f"{name} contains NaN or Inf values."
-            )
-
-    @staticmethod
-    def _validate_5d_tensor(
-        tensor,
-        name,
-    ):
-        """
-        Validate a tensor using the project's canonical
-        seismic tensor convention:
-
-            [B, C, D, H, W]
-        """
-
-        TotalLoss._validate_tensor(
-            tensor=tensor,
-            name=name,
-        )
-
-        if tensor.ndim != 5:
-            raise ValueError(
-                f"{name} must have shape [B, C, D, H, W]. "
-                f"Received shape {tuple(tensor.shape)}."
-            )
-
-    # =====================================================
-    # Forward pass
-    # =====================================================
+            raise ValueError(f"{name} contains NaN or Inf values.")
 
     def forward(
         self,
         prediction,
         target,
+        pressure_wavefield=None,
         velocity=None,
-        source_indices=None,
-        travel_time=None,
-        travel_time_target=None,
+        source=None,
         log_variance=None,
     ):
         """
-        Calculate the complete composite loss.
+        Compute the composite loss.
 
         Parameters
         ----------
-        prediction : torch.Tensor
-            Reconstructed seismic volume.
+        prediction, target : torch.Tensor
+            Reconstructed and ground-truth seismic cubes, identical
+            [B, C, D, H, W] shapes.
 
-        target : torch.Tensor
-            Ground-truth seismic volume.
+        pressure_wavefield : torch.Tensor, optional
+            Time-dependent pressure field expected by the acoustic loss,
+            conventionally [B, 1, T, D, H, W].
 
         velocity : torch.Tensor, optional
-            Velocity model.
+            Acoustic velocity model expected by AcousticWaveEquationLoss,
+            conventionally [B, 1, D, H, W].
 
-        source_indices : torch.Tensor, optional
-            Source coordinates in:
-
-                [depth, crossline, inline]
-
-            with shape [B, 3].
-
-        travel_time : torch.Tensor, optional
-            Predicted travel-time field.
-
-        travel_time_target : torch.Tensor, optional
-            Ground-truth travel-time field.
+        source : torch.Tensor, optional
+            Source term with the same shape as pressure_wavefield.
 
         log_variance : torch.Tensor, optional
-            Predicted logarithmic aleatoric variance.
+            Predicted log aleatoric variance with the same shape as
+            prediction and target.
 
         Returns
         -------
         dict
-            Dictionary containing:
-
-            - total_loss
-            - mae_loss
-            - physics_loss
-            - uncertainty_loss
-            - ssim_loss
-            - weighted_mae_loss
-            - weighted_physics_loss
-            - weighted_uncertainty_loss
-            - weighted_ssim_loss
-            - eikonal_loss
-            - source_loss
-            - travel_time_loss
+            Scalar loss tensors, including acoustic physics diagnostics.
         """
+        self._validate_floating_tensor(prediction, "prediction", ndim=5)
+        self._validate_floating_tensor(target, "target", ndim=5)
 
-        # -------------------------------------------------
-        # Validate reconstruction tensors.
-        # -------------------------------------------------
-        self._validate_5d_tensor(
-            prediction,
-            "prediction",
-        )
-
-        self._validate_5d_tensor(
-            target,
-            "target",
-        )
-
-        # -------------------------------------------------
-        # Prediction and target must have identical shapes.
-        # -------------------------------------------------
         if prediction.shape != target.shape:
             raise ValueError(
-                "prediction and target must have identical "
-                f"shapes. Received "
-                f"{tuple(prediction.shape)} and "
-                f"{tuple(target.shape)}."
+                "prediction and target must have identical shapes; "
+                f"received {tuple(prediction.shape)} and {tuple(target.shape)}."
             )
-
-        # -------------------------------------------------
-        # Prediction and target must use the same numerical
-        # dtype.
-        # -------------------------------------------------
         if prediction.dtype != target.dtype:
-            raise TypeError(
-                "prediction and target must have the same "
-                f"dtype. Received {prediction.dtype} and "
-                f"{target.dtype}."
-            )
-
-        # -------------------------------------------------
-        # Validate optional velocity field.
-        # -------------------------------------------------
-        if velocity is not None:
-
-            self._validate_5d_tensor(
-                velocity,
-                "velocity",
-            )
-
-            if velocity.shape != target.shape:
-                raise ValueError(
-                    "velocity and target must have identical "
-                    f"shapes. Received "
-                    f"{tuple(velocity.shape)} and "
-                    f"{tuple(target.shape)}."
-                )
-
-        # -------------------------------------------------
-        # Validate optional travel-time prediction.
-        # -------------------------------------------------
-        if travel_time is not None:
-
-            self._validate_5d_tensor(
-                travel_time,
-                "travel_time",
-            )
-
-            if travel_time.shape != target.shape:
-                raise ValueError(
-                    "travel_time and target must have "
-                    "identical shapes. Received "
-                    f"{tuple(travel_time.shape)} and "
-                    f"{tuple(target.shape)}."
-                )
-
-        # -------------------------------------------------
-        # Validate optional travel-time target.
-        # -------------------------------------------------
-        if travel_time_target is not None:
-
-            self._validate_5d_tensor(
-                travel_time_target,
-                "travel_time_target",
-            )
-
-            if travel_time_target.shape != target.shape:
-                raise ValueError(
-                    "travel_time_target and target must have "
-                    "identical shapes. Received "
-                    f"{tuple(travel_time_target.shape)} and "
-                    f"{tuple(target.shape)}."
-                )
-
-        # -------------------------------------------------
-        # Validate optional logarithmic variance.
-        # -------------------------------------------------
-        if log_variance is not None:
-
-            self._validate_5d_tensor(
-                log_variance,
-                "log_variance",
-            )
-
-            if log_variance.shape != target.shape:
-                raise ValueError(
-                    "log_variance and target must have "
-                    "identical shapes. Received "
-                    f"{tuple(log_variance.shape)} and "
-                    f"{tuple(target.shape)}."
-                )
-
-        # -------------------------------------------------
-        # Validate source indices.
-        #
-        # Canonical ordering:
-        #
-        #     [depth, crossline, inline]
-        #
-        # Expected shape:
-        #
-        #     [B, 3]
-        # -------------------------------------------------
-        if source_indices is not None:
-
-            if not isinstance(
-                source_indices,
-                torch.Tensor,
-            ):
-                raise TypeError(
-                    "source_indices must be a "
-                    "torch.Tensor."
-                )
-
-            if source_indices.ndim != 2:
-                raise ValueError(
-                    "source_indices must have shape [B, 3]. "
-                    f"Received "
-                    f"{tuple(source_indices.shape)}."
-                )
-
-            if source_indices.shape[0] != prediction.shape[0]:
-                raise ValueError(
-                    "The batch dimension of source_indices "
-                    "must match prediction."
-                )
-
-            if source_indices.shape[1] != 3:
-                raise ValueError(
-                    "source_indices must contain exactly "
-                    "three coordinates in the order "
-                    "[depth, crossline, inline]."
-                )
-
-            if not torch.isfinite(
-                source_indices.to(torch.float32)
-            ).all():
-                raise ValueError(
-                    "source_indices contains NaN or Inf."
-                )
-
-        # =================================================
-        # 1. MAE reconstruction loss
-        # =================================================
-
-        mae_value = self.mae_loss(
-            prediction,
-            target,
-        )
-
-        # =================================================
-        # 2. Physics-informed loss
-        # =================================================
-        #
-        # PhysicsLoss is responsible for evaluating the
-        # configured physics terms.
-        #
-        # We do NOT arbitrarily normalize the physics loss
-        # here. Its numerical scale must remain traceable to
-        # the Eikonal equation, velocity units, grid spacing,
-        # and any travel-time representation used by the
-        # network.
-        # =================================================
-
-        if velocity is not None:
-
-            physics_output = self.physics_loss(
-                velocity=velocity,
-                travel_time=travel_time,
-                source_indices=source_indices,
-                travel_time_target=travel_time_target,
-            )
-
-            # -------------------------------------------------
-            # PhysicsLoss is expected to return either:
-            #
-            #     total, eikonal, source, travel_time
-            #
-            # or a dictionary containing those quantities.
-            #
-            # The final implementation below accepts the
-            # dictionary form used by the framework.
-            # -------------------------------------------------
-            if isinstance(physics_output, dict):
-
-                physics_value = physics_output[
-                    "physics_loss"
-                ]
-
-                eikonal_value = physics_output.get(
-                    "eikonal_loss",
-                    torch.zeros_like(physics_value),
-                )
-
-                source_value = physics_output.get(
-                    "source_loss",
-                    torch.zeros_like(physics_value),
-                )
-
-                travel_time_value = physics_output.get(
-                    "travel_time_loss",
-                    torch.zeros_like(physics_value),
-                )
-
-            elif isinstance(physics_output, tuple):
-
-                if len(physics_output) != 4:
-                    raise ValueError(
-                        "PhysicsLoss tuple output must contain "
-                        "exactly four values: "
-                        "(physics_loss, eikonal_loss, "
-                        "source_loss, travel_time_loss)."
-                    )
-
-                (
-                    physics_value,
-                    eikonal_value,
-                    source_value,
-                    travel_time_value,
-                ) = physics_output
-
-            else:
-
-                raise TypeError(
-                    "PhysicsLoss must return either a "
-                    "dictionary or a four-element tuple."
-                )
-
-        else:
-
-            # -------------------------------------------------
-            # Physics cannot be evaluated without velocity.
-            # A zero physics contribution is therefore used.
-            # -------------------------------------------------
-            zero = prediction.new_zeros(())
-
-            physics_value = zero
-            eikonal_value = zero
-            source_value = zero
-            travel_time_value = zero
-
-        # =================================================
-        # 3. Heteroscedastic aleatoric uncertainty loss
-        # =================================================
+            raise TypeError("prediction and target must have the same dtype.")
 
         if log_variance is not None:
+            self._validate_floating_tensor(
+                log_variance, "log_variance", ndim=5
+            )
+            if log_variance.shape != prediction.shape:
+                raise ValueError(
+                    "log_variance must have the same shape as prediction."
+                )
 
+        mae_value = self.mae_loss(prediction, target)
+        ssim_value = self.ssim_loss(prediction, target)
+
+        # Aleatoric uncertainty is optional; if the model does not produce
+        # log variance, its contribution is exactly zero.
+        if log_variance is not None:
             uncertainty_value = self.uncertainty_loss(
                 prediction=prediction,
                 target=target,
                 log_variance=log_variance,
             )
-
         else:
-
             uncertainty_value = prediction.new_zeros(())
 
-        # =================================================
-        # 4. SSIM loss
-        # =================================================
-
-        ssim_value = self.ssim_loss(
-            prediction,
-            target,
+        # Acoustic physics is evaluated only when all physical inputs are
+        # supplied. A missing physical input is never silently replaced by
+        # the reconstructed static seismic cube.
+        physics_inputs = (
+            pressure_wavefield is not None,
+            velocity is not None,
+            source is not None,
         )
+        if any(physics_inputs) and not all(physics_inputs):
+            raise ValueError(
+                "Provide pressure_wavefield, velocity, and source together "
+                "to evaluate the acoustic wave-equation loss."
+            )
 
-        # =================================================
-        # 5. Apply configured top-level weights
-        # =================================================
+        if all(physics_inputs):
+            if self.acoustic_loss is None:
+                raise RuntimeError(
+                    "Acoustic inputs were supplied, but TotalLoss has no "
+                    "configured AcousticWaveEquationLoss. Pass an instance "
+                    "using TotalLoss(acoustic_loss=...)."
+                )
 
-        weighted_mae = (
-            self.loss_weights["mae"]
-            * mae_value
-        )
+            physics_output = self.acoustic_loss(
+                pressure=pressure_wavefield,
+                velocity=velocity,
+                source=source,
+            )
+            if not isinstance(physics_output, dict):
+                raise TypeError(
+                    "AcousticWaveEquationLoss must return a dictionary."
+                )
+            if "physics_loss" not in physics_output:
+                raise KeyError(
+                    "AcousticWaveEquationLoss output must contain "
+                    "'physics_loss'."
+                )
 
-        weighted_physics = (
-            self.loss_weights["physics"]
-            * physics_value
-        )
+            physics_value = physics_output["physics_loss"]
+            acoustic_residual_rms = physics_output.get(
+                "acoustic_residual_rms",
+                physics_value.new_zeros(()),
+            )
+            acoustic_wave_equation_value = physics_output.get(
+                "acoustic_wave_equation_loss",
+                physics_value,
+            )
+        else:
+            physics_value = prediction.new_zeros(())
+            acoustic_residual_rms = prediction.new_zeros(())
+            acoustic_wave_equation_value = prediction.new_zeros(())
 
+        for name, value in (
+            ("physics_loss", physics_value),
+            ("acoustic_residual_rms", acoustic_residual_rms),
+            ("acoustic_wave_equation_loss", acoustic_wave_equation_value),
+            ("mae_loss", mae_value),
+            ("uncertainty_loss", uncertainty_value),
+            ("ssim_loss", ssim_value),
+        ):
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"{name} must be a torch.Tensor.")
+            if not torch.isfinite(value).all():
+                raise ValueError(f"{name} contains NaN or Inf values.")
+
+        weighted_mae = self.loss_weights["mae"] * mae_value
+        weighted_physics = self.loss_weights["physics"] * physics_value
         weighted_uncertainty = (
-            self.loss_weights["uncertainty"]
-            * uncertainty_value
+            self.loss_weights["uncertainty"] * uncertainty_value
         )
-
-        weighted_ssim = (
-            self.loss_weights["ssim"]
-            * ssim_value
-        )
-
-        # =================================================
-        # 6. Composite objective
-        # =================================================
+        weighted_ssim = self.loss_weights["ssim"] * ssim_value
 
         total_loss = (
             weighted_mae
@@ -751,44 +327,19 @@ class TotalLoss(nn.Module):
             + weighted_ssim
         )
 
-        # -------------------------------------------------
-        # Final numerical validation.
-        # -------------------------------------------------
-        loss_components = {
+        if not torch.isfinite(total_loss).all():
+            raise ValueError("total_loss contains NaN or Inf values.")
+
+        return {
             "total_loss": total_loss,
             "mae_loss": mae_value,
             "physics_loss": physics_value,
+            "acoustic_wave_equation_loss": acoustic_wave_equation_value,
+            "acoustic_residual_rms": acoustic_residual_rms,
             "uncertainty_loss": uncertainty_value,
             "ssim_loss": ssim_value,
             "weighted_mae_loss": weighted_mae,
             "weighted_physics_loss": weighted_physics,
             "weighted_uncertainty_loss": weighted_uncertainty,
             "weighted_ssim_loss": weighted_ssim,
-            "eikonal_loss": eikonal_value,
-            "source_loss": source_value,
-            "travel_time_loss": travel_time_value,
         }
-
-        for name, value in loss_components.items():
-
-            if not isinstance(value, torch.Tensor):
-                raise TypeError(
-                    f"{name} must be a torch.Tensor."
-                )
-
-            if not torch.isfinite(value).all():
-                raise ValueError(
-                    f"{name} contains NaN or Inf."
-                )
-
-        # -------------------------------------------------
-        # Return all components for:
-        #
-        # - training diagnostics
-        # - TensorBoard
-        # - reports
-        # - ablation studies
-        # - physics auditing
-        # - uncertainty auditing
-        # -------------------------------------------------
-        return loss_components
