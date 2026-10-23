@@ -25,7 +25,7 @@ Future Extensions
 • Unconformities
 • Realistic acquisition effects
 
-Author: Ormin Joseph
+Author: Ormin Joseph Bundega
 =========================================================
 """
 
