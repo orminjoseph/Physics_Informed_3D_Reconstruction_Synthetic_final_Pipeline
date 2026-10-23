@@ -785,17 +785,47 @@ def run_single_experiment(
 
     # ---------------------------------------------------------------
     # One controlled case uses the first sample.
+    #
+    # Support both the original six-value dataset interface and
+    # a seven-value interface that includes an additional source
+    # representation.
     # ---------------------------------------------------------------
 
-    (
-        corrupted,
-        target,
-        mask,
-        velocity,
-        actual_mask_mode,
-        actual_geological_mode,
-    ) = dataset[0]
+    sample = dataset[0]
 
+    if not isinstance(sample, (tuple, list)):
+        raise TypeError(
+            "SyntheticSeismicDataset[0] must return a tuple or list. "
+            f"Received {type(sample).__name__}."
+        )
+
+    if len(sample) == 6:
+        (
+            corrupted,
+            target,
+            mask,
+            velocity,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+    elif len(sample) == 7:
+        (
+            corrupted,
+            target,
+            mask,
+            velocity,
+            _source,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+    else:
+        raise ValueError(
+            "Unexpected SyntheticSeismicDataset sample interface. "
+            "Expected either 6 or 7 returned values. "
+            f"Received {len(sample)} values."
+        )
     # ---------------------------------------------------------------
     # Convert everything to tensors.
     # ---------------------------------------------------------------

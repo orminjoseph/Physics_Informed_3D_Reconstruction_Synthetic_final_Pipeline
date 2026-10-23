@@ -1093,11 +1093,30 @@ def select_cases_for_execution(
 # SINGLE CONTROLLED EXPERIMENT
 # ==============================================================
 
+
+# ==============================================================
+# SINGLE CONTROLLED EXPERIMENT
+# ==============================================================
+
 def run_single_experiment(
     case: dict,
 ) -> dict:
     """
     Run one controlled CS experiment.
+
+    Dataset compatibility:
+        Supports both six-value and seven-value samples.
+
+    Six-value format:
+        corrupted_cube, target, mask, velocity,
+        actual_mask_mode, actual_geological_mode
+
+    Seven-value format:
+        corrupted_cube, target, mask, velocity, source,
+        actual_mask_mode, actual_geological_mode
+
+    The velocity and optional source are not used by this
+    classical, physics-agnostic CS reconstruction baseline.
     """
 
     from dataset.synthetic_dataset import (
@@ -1123,16 +1142,76 @@ def run_single_experiment(
         seed=case["seed"],
     )
 
-    (
-        corrupted_cube,
-        target,
-        mask,
-        velocity,
-        actual_mask_mode,
-        actual_geological_mode,
-    ) = dataset[0]
+    # ----------------------------------------------------------
+    # DATASET COMPATIBILITY FIX
+    # Support six-value and seven-value sample interfaces.
+    # ----------------------------------------------------------
 
+    sample = dataset[0]
+
+    if not isinstance(sample, (tuple, list)):
+        raise TypeError(
+            "SyntheticSeismicDataset[0] must return a tuple "
+            "or list. "
+            f"Received {type(sample).__name__}."
+        )
+
+    if len(sample) == 6:
+
+        (
+            corrupted_cube,
+            target,
+            mask,
+            velocity,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+    elif len(sample) == 7:
+
+        (
+            corrupted_cube,
+            target,
+            mask,
+            velocity,
+            _source,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+    else:
+
+        raise ValueError(
+            "Unexpected SyntheticSeismicDataset sample "
+            "interface. Expected either 6 or 7 returned "
+            f"values, but received {len(sample)}."
+        )
+
+    # The CS baseline does not use velocity or source data.
     del velocity
+
+    if len(sample) == 7:
+        del _source
+
+    # ----------------------------------------------------------
+    # NORMALIZE DATA TYPES
+    # ----------------------------------------------------------
+
+    corrupted_cube = torch.as_tensor(
+        corrupted_cube
+    )
+
+    target = torch.as_tensor(
+        target
+    )
+
+    mask = torch.as_tensor(
+        mask
+    )
+
+    # ----------------------------------------------------------
+    # VALIDATE DATA SHAPES
+    # ----------------------------------------------------------
 
     if corrupted_cube.ndim != 4:
         raise ValueError(
@@ -1143,13 +1222,39 @@ def run_single_experiment(
 
     if target.shape != corrupted_cube.shape:
         raise ValueError(
-            "Target and corrupted cube shapes differ."
+            "Target and corrupted cube shapes differ. "
+            f"Target: {tuple(target.shape)}, "
+            f"corrupted cube: {tuple(corrupted_cube.shape)}."
         )
 
     if mask.shape != corrupted_cube.shape:
         raise ValueError(
-            "Mask and corrupted cube shapes differ."
+            "Mask and corrupted cube shapes differ. "
+            f"Mask: {tuple(mask.shape)}, "
+            f"corrupted cube: {tuple(corrupted_cube.shape)}."
         )
+
+    # ----------------------------------------------------------
+    # VALIDATE ACTUAL EXPERIMENTAL MODES
+    # ----------------------------------------------------------
+
+    if actual_mask_mode != case["mask_mode"]:
+        raise ValueError(
+            "Dataset returned an unexpected mask mode. "
+            f"Requested: {case['mask_mode']}; "
+            f"received: {actual_mask_mode}."
+        )
+
+    if actual_geological_mode != case["geological_mode"]:
+        raise ValueError(
+            "Dataset returned an unexpected geological mode. "
+            f"Requested: {case['geological_mode']}; "
+            f"received: {actual_geological_mode}."
+        )
+
+    # ----------------------------------------------------------
+    # VALIDATE FINITE VALUES
+    # ----------------------------------------------------------
 
     check_finite(
         corrupted_cube,
@@ -1166,11 +1271,19 @@ def run_single_experiment(
         "mask",
     )
 
+    # ----------------------------------------------------------
+    # ACTUAL MISSING RATE
+    # ----------------------------------------------------------
+
     actual_missing_rate = float(
         torch.mean(
             (mask == 0).float()
         ).item()
     )
+
+    # ----------------------------------------------------------
+    # RUN COMPRESSIVE SENSING
+    # ----------------------------------------------------------
 
     start_time = time.perf_counter()
 
@@ -1218,11 +1331,13 @@ def run_single_experiment(
         OBSERVED_PRESERVATION_TOLERANCE
     ):
         raise RuntimeError(
-            "Observed-data preservation tolerance exceeded."
+            "Observed-data preservation tolerance exceeded. "
+            f"Maximum error: "
+            f"{observed_preservation_error:.6e}."
         )
 
     # ----------------------------------------------------------
-    # METRICS
+    # CALCULATE METRICS
     # ----------------------------------------------------------
 
     metrics = calculate_metrics(
@@ -1230,6 +1345,10 @@ def run_single_experiment(
         target,
         mask,
     )
+
+    # ----------------------------------------------------------
+    # BUILD RESULT
+    # ----------------------------------------------------------
 
     result = {
         "Case_ID": case["Case_ID"],
@@ -1250,12 +1369,8 @@ def run_single_experiment(
         "PSNR": metrics["PSNR"],
         "SNR": metrics["SNR"],
         "SSIM": metrics["SSIM"],
-        "Missing_MAE": metrics[
-            "Missing_MAE"
-        ],
-        "Missing_RMSE": metrics[
-            "Missing_RMSE"
-        ],
+        "Missing_MAE": metrics["Missing_MAE"],
+        "Missing_RMSE": metrics["Missing_RMSE"],
         "Runtime_Seconds": runtime_seconds,
         "Observed_Preservation_Error": (
             observed_preservation_error

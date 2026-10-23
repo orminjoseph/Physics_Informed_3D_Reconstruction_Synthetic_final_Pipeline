@@ -1331,8 +1331,9 @@ def select_cases_for_execution(
     ]
 
 
+
 # ==============================================================
-# SINGLE CONTROLLED EXPERIMENT
+# SINGLE CONTROLLED EXPERIMENT — DATASET COMPATIBILITY CORRECTION
 # ==============================================================
 
 def run_single_experiment(
@@ -1340,6 +1341,12 @@ def run_single_experiment(
 ) -> dict:
     """
     Execute one controlled dictionary-learning experiment.
+
+    Supports SyntheticSeismicDataset samples containing either
+    six or seven returned values.
+
+    The dictionary-learning algorithm remains unchanged and
+    does not use ground-truth data during dictionary training.
     """
 
     from dataset.synthetic_dataset import (
@@ -1362,36 +1369,88 @@ def run_single_experiment(
         num_samples=BASELINE_NUM_SAMPLES,
         cube_size=BASELINE_CUBE_SIZE,
         missing_probability=(
-            case[
-                "requested_missing_rate"
-            ]
+            case["requested_missing_rate"]
         ),
         geological_mode=(
-            case[
-                "geological_mode"
-            ]
+            case["geological_mode"]
         ),
         mask_mode=(
-            case[
-                "mask_mode"
-            ]
+            case["mask_mode"]
         ),
-        seed=case[
-            "seed"
-        ],
+        seed=case["seed"],
     )
 
-    (
-        corrupted_cube,
-        target,
-        mask,
-        velocity,
-        actual_mask_mode,
-        actual_geological_mode,
-    ) = dataset[0]
+    # ----------------------------------------------------------
+    # COMPATIBILITY CORRECTION
+    #
+    # Accept either the six-value or seven-value dataset
+    # interface. The seven-value ordering below assumes that
+    # the additional value is source metadata after velocity.
+    # ----------------------------------------------------------
+
+    sample = dataset[0]
+
+    if not isinstance(
+        sample,
+        (tuple, list),
+    ):
+        raise TypeError(
+            "SyntheticSeismicDataset[0] must return a tuple or list. "
+            f"Received {type(sample).__name__}."
+        )
+
+    if len(sample) == 6:
+
+        (
+            corrupted_cube,
+            target,
+            mask,
+            velocity,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+    elif len(sample) == 7:
+
+        (
+            corrupted_cube,
+            target,
+            mask,
+            velocity,
+            _source,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+        # Source metadata are not required by this baseline.
+        del _source
+
+    else:
+
+        raise ValueError(
+            "Unexpected SyntheticSeismicDataset sample interface. "
+            "Expected either 6 or 7 returned values, "
+            f"but received {len(sample)}."
+        )
 
     # Velocity is not required by dictionary learning.
     del velocity
+
+    # ----------------------------------------------------------
+    # Convert dataset outputs to tensors when necessary.
+    # ----------------------------------------------------------
+
+    corrupted_cube = torch.as_tensor(
+        corrupted_cube
+    )
+
+    target = torch.as_tensor(
+        target
+    )
+
+    mask = torch.as_tensor(
+        mask
+    )
 
     # ----------------------------------------------------------
     # Validate generated data.
@@ -1400,13 +1459,30 @@ def run_single_experiment(
     if corrupted_cube.shape != target.shape:
 
         raise RuntimeError(
-            "Corrupted cube and target have different shapes."
+            "Corrupted cube and target have different shapes.\n"
+            f"Corrupted: {tuple(corrupted_cube.shape)}\n"
+            f"Target: {tuple(target.shape)}"
         )
 
     if corrupted_cube.shape != mask.shape:
 
         raise RuntimeError(
-            "Corrupted cube and mask have different shapes."
+            "Corrupted cube and mask have different shapes.\n"
+            f"Corrupted: {tuple(corrupted_cube.shape)}\n"
+            f"Mask: {tuple(mask.shape)}"
+        )
+
+    expected_shape = (
+        1,
+        *BASELINE_CUBE_SIZE,
+    )
+
+    if tuple(corrupted_cube.shape) != expected_shape:
+
+        raise RuntimeError(
+            "Unexpected synthetic cube shape. "
+            f"Expected {expected_shape}, "
+            f"received {tuple(corrupted_cube.shape)}."
         )
 
     check_finite(
@@ -1425,14 +1501,32 @@ def run_single_experiment(
     )
 
     # ----------------------------------------------------------
+    # Validate the requested experimental conditions.
+    # ----------------------------------------------------------
+
+    if actual_mask_mode != case["mask_mode"]:
+
+        raise RuntimeError(
+            "Generated mask mode does not match the requested "
+            f"mode. Requested: {case['mask_mode']}; "
+            f"actual: {actual_mask_mode}."
+        )
+
+    if actual_geological_mode != case["geological_mode"]:
+
+        raise RuntimeError(
+            "Generated geological mode does not match the requested "
+            f"mode. Requested: {case['geological_mode']}; "
+            f"actual: {actual_geological_mode}."
+        )
+
+    # ----------------------------------------------------------
     # Actual missing rate.
     # ----------------------------------------------------------
 
     actual_missing_rate = float(
         torch.mean(
-            (
-                mask == 0
-            ).float()
+            (mask == 0).float()
         ).item()
     )
 
@@ -1440,21 +1534,15 @@ def run_single_experiment(
     # Run dictionary-learning reconstruction.
     # ----------------------------------------------------------
 
-    start_time = (
-        time.perf_counter()
-    )
+    start_time = time.perf_counter()
 
-    reconstruction = (
-        dictionary_learning_reconstruction(
-            corrupted_cube=corrupted_cube,
-            mask=mask,
-        )
+    reconstruction = dictionary_learning_reconstruction(
+        corrupted_cube=corrupted_cube,
+        mask=mask,
     )
 
     runtime_seconds = (
-        time.perf_counter()
-        -
-        start_time
+        time.perf_counter() - start_time
     )
 
     check_finite(
@@ -1470,20 +1558,13 @@ def run_single_experiment(
         mask == 1
     )
 
-    if torch.any(
-        observed
-    ):
+    if torch.any(observed):
 
         observed_preservation_error = float(
             torch.max(
                 torch.abs(
-                    reconstruction[
-                        observed
-                    ]
-                    -
-                    corrupted_cube[
-                        observed
-                    ]
+                    reconstruction[observed]
+                    - corrupted_cube[observed]
                 )
             ).item()
         )
@@ -1494,8 +1575,7 @@ def run_single_experiment(
 
     if (
         observed_preservation_error
-        >
-        OBSERVED_PRESERVATION_TOLERANCE
+        > OBSERVED_PRESERVATION_TOLERANCE
     ):
 
         raise RuntimeError(
@@ -1515,87 +1595,39 @@ def run_single_experiment(
     )
 
     # ----------------------------------------------------------
-    # Store results.
+    # Store results using the existing CSV schema.
     # ----------------------------------------------------------
 
     return {
-        "Case_ID": case[
-            "Case_ID"
-        ],
-        "Method": (
-            "Dictionary_Learning"
-        ),
-        "geological_mode": (
-            actual_geological_mode
-        ),
-        "mask_mode": (
-            actual_mask_mode
-        ),
+        "Case_ID": case["Case_ID"],
+        "Method": "Dictionary_Learning",
+        "geological_mode": actual_geological_mode,
+        "mask_mode": actual_mask_mode,
         "requested_missing_rate": (
-            case[
-                "requested_missing_rate"
-            ]
+            case["requested_missing_rate"]
         ),
-        "actual_missing_rate": (
-            actual_missing_rate
-        ),
-        "seed": case[
-            "seed"
-        ],
-        "Num_Samples": (
-            BASELINE_NUM_SAMPLES
-        ),
-        "Cube_D": (
-            BASELINE_CUBE_SIZE[0]
-        ),
-        "Cube_H": (
-            BASELINE_CUBE_SIZE[1]
-        ),
-        "Cube_W": (
-            BASELINE_CUBE_SIZE[2]
-        ),
-        "MAE": metrics[
-            "MAE"
-        ],
-        "RMSE": metrics[
-            "RMSE"
-        ],
-        "PSNR": metrics[
-            "PSNR"
-        ],
-        "SNR": metrics[
-            "SNR"
-        ],
-        "SSIM": metrics[
-            "SSIM"
-        ],
-        "Missing_MAE": metrics[
-            "Missing_MAE"
-        ],
-        "Missing_RMSE": metrics[
-            "Missing_RMSE"
-        ],
-        "Runtime_Seconds": (
-            runtime_seconds
-        ),
+        "actual_missing_rate": actual_missing_rate,
+        "seed": case["seed"],
+        "Num_Samples": BASELINE_NUM_SAMPLES,
+        "Cube_D": BASELINE_CUBE_SIZE[0],
+        "Cube_H": BASELINE_CUBE_SIZE[1],
+        "Cube_W": BASELINE_CUBE_SIZE[2],
+        "MAE": metrics["MAE"],
+        "RMSE": metrics["RMSE"],
+        "PSNR": metrics["PSNR"],
+        "SNR": metrics["SNR"],
+        "SSIM": metrics["SSIM"],
+        "Missing_MAE": metrics["Missing_MAE"],
+        "Missing_RMSE": metrics["Missing_RMSE"],
+        "Runtime_Seconds": runtime_seconds,
         "Observed_Preservation_Error": (
             observed_preservation_error
         ),
-        "Patch_Size": (
-            str(DEFAULT_PATCH_SIZE)
-        ),
-        "N_Components": (
-            DEFAULT_N_COMPONENTS
-        ),
-        "Alpha": (
-            DEFAULT_ALPHA
-        ),
-        "Max_Iterations": (
-            DEFAULT_MAX_ITER
-        ),
-        "Batch_Size": (
-            DEFAULT_BATCH_SIZE
-        ),
+        "Patch_Size": str(DEFAULT_PATCH_SIZE),
+        "N_Components": DEFAULT_N_COMPONENTS,
+        "Alpha": DEFAULT_ALPHA,
+        "Max_Iterations": DEFAULT_MAX_ITER,
+        "Batch_Size": DEFAULT_BATCH_SIZE,
         "Max_Training_Patches": (
             DEFAULT_MAX_TRAINING_PATCHES
         ),
@@ -1607,7 +1639,6 @@ def run_single_experiment(
         ),
         "Status": "PASS",
     }
-
 
 # ==============================================================
 # SUMMARY STATISTICS

@@ -1488,157 +1488,159 @@ def select_cases_for_execution(
     ]
 
 
+
 # ======================================================================
-# DATASET SAMPLE EXTRACTION
+# DATASET SAMPLE EXTRACTION — COMPATIBILITY CORRECTION
 # ======================================================================
 
 def _extract_sample(
     sample: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Extract target, corrupted cube and mask from a dataset sample.
+    Extract target, corrupted cube and mask from SyntheticSeismicDataset.
 
-    The function supports the dictionary conventions used by the
-    synthetic seismic dataset and provides clear errors if the
-    expected fields are unavailable.
+    Supports:
+        1. Dictionary-based samples.
+        2. Six-element tuple/list samples.
+        3. Seven-element tuple/list samples.
+
+    For tuple/list samples, the expected ordering is:
+
+    Six elements:
+        corrupted_cube, target, mask, velocity,
+        actual_mask_mode, actual_geological_mode
+
+    Seven elements:
+        corrupted_cube, target, mask, velocity, source,
+        actual_mask_mode, actual_geological_mode
+
+    Returns:
+        target, corrupted_cube, mask
+
+    Ground truth is returned only for subsequent evaluation.
+    It is never passed into the f-x reconstruction algorithm.
     """
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     # Dictionary-based dataset output.
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
 
-    if isinstance(
-        sample,
-        dict,
-    ):
+    if isinstance(sample, dict):
 
-        # --------------------------------------------------------------
-        # Possible target/clean field names.
-        # --------------------------------------------------------------
+        target = next(
+            (
+                sample[key]
+                for key in (
+                    "target",
+                    "clean",
+                    "clean_cube",
+                    "ground_truth",
+                    "ground_truth_cube",
+                )
+                if key in sample
+            ),
+            None,
+        )
 
-        target = None
+        corrupted_cube = next(
+            (
+                sample[key]
+                for key in (
+                    "corrupted",
+                    "corrupted_cube",
+                    "input",
+                    "input_cube",
+                )
+                if key in sample
+            ),
+            None,
+        )
 
-        for key in (
-            "target",
-            "clean",
-            "clean_cube",
-            "ground_truth",
-            "ground_truth_cube",
-        ):
-
-            if key in sample:
-
-                target = sample[
-                    key
-                ]
-
-                break
-
-        # --------------------------------------------------------------
-        # Possible corrupted/input field names.
-        # --------------------------------------------------------------
-
-        corrupted = None
-
-        for key in (
-            "corrupted",
-            "corrupted_cube",
-            "input",
-            "input_cube",
-        ):
-
-            if key in sample:
-
-                corrupted = sample[
-                    key
-                ]
-
-                break
-
-        # --------------------------------------------------------------
-        # Mask.
-        # --------------------------------------------------------------
-
-        mask = None
-
-        for key in (
-            "mask",
-            "observation_mask",
-        ):
-
-            if key in sample:
-
-                mask = sample[
-                    key
-                ]
-
-                break
+        mask = next(
+            (
+                sample[key]
+                for key in (
+                    "mask",
+                    "observation_mask",
+                )
+                if key in sample
+            ),
+            None,
+        )
 
         if (
             target is None
-            or corrupted is None
+            or corrupted_cube is None
             or mask is None
         ):
-
             raise KeyError(
-                "Could not identify target, corrupted cube, "
-                "and mask in the synthetic dataset sample. "
+                "Could not identify target, corrupted cube and mask "
+                "in the dictionary-based dataset sample. "
                 f"Available keys: {list(sample.keys())}"
             )
 
         return (
-            torch.as_tensor(
-                target,
-                dtype=torch.float32,
-            ),
-            torch.as_tensor(
-                corrupted,
-                dtype=torch.float32,
-            ),
-            torch.as_tensor(
-                mask,
-                dtype=torch.float32,
-            ),
+            torch.as_tensor(target, dtype=torch.float32),
+            torch.as_tensor(corrupted_cube, dtype=torch.float32),
+            torch.as_tensor(mask, dtype=torch.float32),
         )
 
-    # ------------------------------------------------------------------
-    # Tuple/list dataset output.
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
+    # Tuple/list-based dataset output.
+    # --------------------------------------------------------------
 
-    if isinstance(
-        sample,
-        (tuple, list),
-    ):
+    if isinstance(sample, (tuple, list)):
 
-        if len(sample) < 3:
+        if len(sample) == 6:
 
+            (
+                corrupted_cube,
+                target,
+                mask,
+                velocity,
+                actual_mask_mode,
+                actual_geological_mode,
+            ) = sample
+
+        elif len(sample) == 7:
+
+            (
+                corrupted_cube,
+                target,
+                mask,
+                velocity,
+                _source,
+                actual_mask_mode,
+                actual_geological_mode,
+            ) = sample
+
+            # Source metadata are not needed by this baseline.
+            del _source
+
+        else:
             raise ValueError(
-                "Dataset sample must contain at least "
-                "three elements: target, corrupted, mask."
+                "Unexpected SyntheticSeismicDataset sample length. "
+                "Expected 6 or 7 elements, "
+                f"but received {len(sample)}."
             )
 
+        # These fields are not needed by the f-x algorithm.
+        del velocity, actual_mask_mode, actual_geological_mode
+
         return (
-            torch.as_tensor(
-                sample[0],
-                dtype=torch.float32,
-            ),
-            torch.as_tensor(
-                sample[1],
-                dtype=torch.float32,
-            ),
-            torch.as_tensor(
-                sample[2],
-                dtype=torch.float32,
-            ),
+            torch.as_tensor(target, dtype=torch.float32),
+            torch.as_tensor(corrupted_cube, dtype=torch.float32),
+            torch.as_tensor(mask, dtype=torch.float32),
         )
 
-    # ------------------------------------------------------------------
-    # Unsupported sample format.
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
+    # Unsupported dataset output.
+    # --------------------------------------------------------------
 
     raise TypeError(
-        "Unsupported synthetic dataset sample type: "
-        f"{type(sample)}"
+        "Unsupported SyntheticSeismicDataset sample type. "
+        f"Expected dict, tuple or list; received "
+        f"{type(sample).__name__}."
     )
 
 

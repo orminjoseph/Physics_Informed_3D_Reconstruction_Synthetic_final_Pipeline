@@ -736,14 +736,45 @@ def run_single_experiment(
     # Retrieve the first sample.
     # ---------------------------------------------------------------
 
-    (
-        corrupted,
-        target,
-        mask,
-        velocity,
-        actual_mask_mode,
-        actual_geological_mode,
-    ) = dataset[0]
+    sample = dataset[0]
+
+    if not isinstance(sample, (tuple, list)):
+        raise TypeError(
+            "SyntheticSeismicDataset[0] must return a tuple or list. "
+            f"Received {type(sample).__name__}."
+        )
+
+    if len(sample) == 6:
+        (
+            corrupted,
+            target,
+            mask,
+            velocity,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+    elif len(sample) == 7:
+        (
+            corrupted,
+            target,
+            mask,
+            velocity,
+            _source,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+    else:
+        raise ValueError(
+            "Unexpected SyntheticSeismicDataset sample interface. "
+            "Expected either 6 values "
+            "(corrupted, target, mask, velocity, mask_mode, "
+            "geological_mode) or 7 values "
+            "(corrupted, target, mask, velocity, source, mask_mode, "
+            "geological_mode). "
+            f"Received {len(sample)} values."
+        )
 
     # ---------------------------------------------------------------
     # Convert all arrays to tensors.

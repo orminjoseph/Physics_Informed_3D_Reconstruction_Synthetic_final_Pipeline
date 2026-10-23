@@ -633,6 +633,31 @@ def run_classical_method(
 
     runtime_seconds = time.perf_counter() - start_time
 
+    # Normalize the baseline output to the input tensor format.
+    reconstruction = torch.as_tensor(
+        reconstruction,
+        dtype=corrupted.dtype,
+        device=corrupted.device,
+    )
+
+    # Accept either (C, D, H, W) or an unchanneled (D, H, W) cube.
+    if tuple(reconstruction.shape) == CUBE_SIZE:
+        reconstruction = reconstruction.unsqueeze(0)
+
+    if tuple(reconstruction.shape) != tuple(corrupted.shape):
+        raise RuntimeError(
+            f"{method_name}: reconstruction shape mismatch. "
+            f"Expected {tuple(corrupted.shape)}, "
+            f"received {tuple(reconstruction.shape)}."
+        )
+
+    # Apply the same observed-data preservation rule to every method.
+    # Only the missing locations retain the baseline's predictions.
+    reconstruction = (
+            (1.0 - mask) * reconstruction
+            + mask * corrupted
+    )
+
     preservation_error = validate_reconstruction(
         reconstruction,
         corrupted,
@@ -1173,14 +1198,54 @@ def main() -> None:
         seed=SEED,
     )
 
-    (
-        corrupted,
-        target,
-        mask,
-        velocity,
-        actual_mask_mode,
-        actual_geological_mode,
-    ) = dataset[0]
+    # -----------------------------------------------------------------
+    # Retrieve the common test sample
+    # Supports the six-value and seven-value dataset conventions.
+    # -----------------------------------------------------------------
+
+    sample = dataset[0]
+
+    if not isinstance(sample, (tuple, list)):
+        raise TypeError(
+            "SyntheticSeismicDataset[0] must return a tuple or list. "
+            f"Received: {type(sample).__name__}"
+        )
+
+    if len(sample) == 6:
+        (
+            corrupted,
+            target,
+            mask,
+            velocity,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+    elif len(sample) == 7:
+        (
+            corrupted,
+            target,
+            mask,
+            velocity,
+            source,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+        # The source is not needed by this comparison script.
+        del source
+
+    else:
+        raise ValueError(
+            "Unexpected SyntheticSeismicDataset return format. "
+            f"Expected 6 or 7 values; received {len(sample)}."
+        )
+
+    # Normalize the four data arrays to float32 tensors.
+    corrupted = torch.as_tensor(corrupted, dtype=torch.float32)
+    target = torch.as_tensor(target, dtype=torch.float32)
+    mask = torch.as_tensor(mask, dtype=torch.float32)
+    velocity = torch.as_tensor(velocity, dtype=torch.float32)
 
     if actual_geological_mode != GEOLOGICAL_MODE:
         raise RuntimeError(

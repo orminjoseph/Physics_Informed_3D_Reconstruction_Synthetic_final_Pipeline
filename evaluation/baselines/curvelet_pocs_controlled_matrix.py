@@ -1143,6 +1143,7 @@ def select_cases_for_execution(
     ]
 
 
+
 # =====================================================================
 # RUN ONE CONTROLLED EXPERIMENT
 # =====================================================================
@@ -1153,32 +1154,30 @@ def run_single_experiment(
     """
     Run one Curvelet POCS controlled experiment.
 
-    Ground truth is never supplied to the reconstruction function.
+    Dataset compatibility:
+        Supports six-value and seven-value sample interfaces.
+
+    Six-value format:
+        corrupted_cube, target_cube, mask, velocity,
+        actual_mask_mode, actual_geological_mode
+
+    Seven-value format:
+        corrupted_cube, target_cube, mask, velocity, source,
+        actual_mask_mode, actual_geological_mode
+
+    Ground truth is used only for evaluation, never for
+    reconstruction.
     """
 
     # =================================================================
     # EXTRACT CASE PARAMETERS
     # =================================================================
 
-    case_id = case[
-        "Case_ID"
-    ]
-
-    geological_mode = case[
-        "geological_mode"
-    ]
-
-    mask_mode = case[
-        "mask_mode"
-    ]
-
-    missing_rate = case[
-        "missing_rate"
-    ]
-
-    seed = case[
-        "seed"
-    ]
+    case_id = case["Case_ID"]
+    geological_mode = case["geological_mode"]
+    mask_mode = case["mask_mode"]
+    missing_rate = case["missing_rate"]
+    seed = case["seed"]
 
     # =================================================================
     # SET SEED
@@ -1187,144 +1186,155 @@ def run_single_experiment(
     set_seed(seed)
 
     # =================================================================
-    # CREATE SYNTHETIC DATASET FOR THIS CONTROLLED CASE
+    # CREATE SYNTHETIC DATASET
     # =================================================================
 
     dataset = SyntheticSeismicDataset(
-        num_samples=(
-            BASELINE_NUM_SAMPLES
-        ),
-        cube_size=(
-            BASELINE_CUBE_SIZE
-        ),
-        missing_probability=(
-            missing_rate
-        ),
-        geological_mode=(
-            geological_mode
-        ),
-        mask_mode=(
-            mask_mode
-        ),
+        num_samples=BASELINE_NUM_SAMPLES,
+        cube_size=BASELINE_CUBE_SIZE,
+        missing_probability=missing_rate,
+        geological_mode=geological_mode,
+        mask_mode=mask_mode,
         seed=seed,
     )
 
     # =================================================================
-    # GET THE CONTROLLED SAMPLE
+    # DATASET COMPATIBILITY CORRECTION
     # =================================================================
 
     sample = dataset[0]
 
-    (
-        corrupted_cube,
-        target_cube,
-        mask,
-        velocity,
-        actual_mask_mode,
-        actual_geological_mode,
-    ) = sample
-
-    # =================================================================
-    # VALIDATE SAMPLE TYPES
-    # =================================================================
-
-    if not isinstance(
-        corrupted_cube,
-        torch.Tensor,
-    ):
+    if not isinstance(sample, (tuple, list)):
         raise TypeError(
-            "Dataset corrupted_cube must be a torch.Tensor."
+            "SyntheticSeismicDataset[0] must return a tuple "
+            "or list. "
+            f"Received {type(sample).__name__}."
         )
 
-    if not isinstance(
-        target_cube,
-        torch.Tensor,
-    ):
-        raise TypeError(
-            "Dataset target_cube must be a torch.Tensor."
+    if len(sample) == 6:
+
+        (
+            corrupted_cube,
+            target_cube,
+            mask,
+            velocity,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+    elif len(sample) == 7:
+
+        (
+            corrupted_cube,
+            target_cube,
+            mask,
+            velocity,
+            _source,
+            actual_mask_mode,
+            actual_geological_mode,
+        ) = sample
+
+    else:
+
+        raise ValueError(
+            "Unexpected SyntheticSeismicDataset sample "
+            "interface. Expected either 6 or 7 returned "
+            f"values, but received {len(sample)}."
         )
 
-    if not isinstance(
-        mask,
-        torch.Tensor,
-    ):
-        raise TypeError(
-            "Dataset mask must be a torch.Tensor."
+    # Curvelet POCS does not use velocity or source data.
+    del velocity
+
+    if len(sample) == 7:
+        del _source
+
+    # =================================================================
+    # NORMALIZE DATA TYPES
+    # =================================================================
+
+    corrupted_cube = torch.as_tensor(
+        corrupted_cube
+    )
+
+    target_cube = torch.as_tensor(
+        target_cube
+    )
+
+    mask = torch.as_tensor(
+        mask
+    )
+
+    # =================================================================
+    # VALIDATE SAMPLE TYPES AND SHAPES
+    # =================================================================
+
+    if corrupted_cube.ndim != 4:
+        raise ValueError(
+            "Expected corrupted_cube shape (C, D, H, W). "
+            f"Received {tuple(corrupted_cube.shape)}."
         )
 
-    # =================================================================
-    # VALIDATE TARGET SHAPE
-    # =================================================================
-
-    if (
-        target_cube.shape
-        != corrupted_cube.shape
-    ):
+    if target_cube.shape != corrupted_cube.shape:
         raise ValueError(
             "Target and corrupted cube shapes differ. "
             f"Target: {tuple(target_cube.shape)}, "
-            f"Corrupted: {tuple(corrupted_cube.shape)}"
+            f"corrupted: {tuple(corrupted_cube.shape)}."
         )
 
-    # =================================================================
-    # VALIDATE CONTROLLED SHAPE
-    # =================================================================
+    if mask.shape != corrupted_cube.shape:
+        raise ValueError(
+            "Mask and corrupted cube shapes differ. "
+            f"Mask: {tuple(mask.shape)}, "
+            f"corrupted: {tuple(corrupted_cube.shape)}."
+        )
 
     expected_shape = (
         1,
         *BASELINE_CUBE_SIZE,
     )
 
-    if (
-        tuple(corrupted_cube.shape)
-        != expected_shape
-    ):
+    if tuple(corrupted_cube.shape) != expected_shape:
         raise ValueError(
             "Unexpected controlled cube shape. "
-            f"Expected {expected_shape}, "
+            f"Expected {expected_shape}; "
             f"received {tuple(corrupted_cube.shape)}."
         )
 
     # =================================================================
-    # VALIDATE FINITE DATA
+    # VALIDATE FINITE VALUES
     # =================================================================
 
-    if not torch.isfinite(
-        corrupted_cube
-    ).all():
+    if not torch.isfinite(corrupted_cube).all():
         raise ValueError(
             "Corrupted cube contains NaN or infinite values."
         )
 
-    if not torch.isfinite(
-        target_cube
-    ).all():
+    if not torch.isfinite(target_cube).all():
         raise ValueError(
             "Target cube contains NaN or infinite values."
         )
 
+    if not torch.isfinite(mask).all():
+        raise ValueError(
+            "Mask contains NaN or infinite values."
+        )
+
     # =================================================================
-    # VALIDATE ACTUAL DATASET METADATA
+    # VALIDATE CONTROLLED EXPERIMENT METADATA
     # =================================================================
 
-    if (
-        actual_mask_mode
-        != mask_mode
-    ):
+    if actual_mask_mode != mask_mode:
         raise RuntimeError(
             "Dataset returned a different mask mode. "
             f"Requested: {mask_mode}; "
-            f"Received: {actual_mask_mode}"
+            f"received: {actual_mask_mode}."
         )
 
-    if (
-        actual_geological_mode
-        != geological_mode
-    ):
+    if actual_geological_mode != geological_mode:
         raise RuntimeError(
             "Dataset returned a different geological mode. "
             f"Requested: {geological_mode}; "
-            f"Received: {actual_geological_mode}"
+            f"received: {actual_geological_mode}."
         )
 
     # =================================================================
@@ -1339,9 +1349,7 @@ def run_single_experiment(
     )
 
     actual_missing_rate = float(
-        np.mean(
-            mask_np == 0
-        )
+        np.mean(mask_np == 0)
     )
 
     # =================================================================
@@ -1350,33 +1358,38 @@ def run_single_experiment(
 
     start_time = time.perf_counter()
 
-    reconstruction = (
-        curvelet_pocs_reconstruction(
-            corrupted_cube=(
-                corrupted_cube
-            ),
-            mask=mask,
-        )
+    reconstruction = curvelet_pocs_reconstruction(
+        corrupted_cube=corrupted_cube,
+        mask=mask,
     )
 
     runtime_seconds = (
-        time.perf_counter()
-        - start_time
+        time.perf_counter() - start_time
     )
 
+    if not torch.isfinite(reconstruction).all():
+        raise FloatingPointError(
+            "Curvelet reconstruction contains NaN "
+            "or infinite values."
+        )
+
     # =================================================================
-    # FINAL OBSERVED-DATA PRESERVATION CHECK
+    # CHECK OBSERVED-DATA PRESERVATION
     # =================================================================
 
-    preservation_error = float(
-        (
+    observed_mask = mask == 1
+
+    if torch.any(observed_mask):
+
+        preservation_error = float(
             (
-                reconstruction
-                - corrupted_cube
-            )
-            * mask
-        ).abs().max().item()
-    )
+                reconstruction[observed_mask]
+                - corrupted_cube[observed_mask]
+            ).abs().max().item()
+        )
+
+    else:
+        preservation_error = 0.0
 
     preservation_pass = (
         preservation_error
@@ -1386,8 +1399,9 @@ def run_single_experiment(
     if not preservation_pass:
         raise RuntimeError(
             "Observed-data preservation failed. "
-            f"Maximum difference: "
-            f"{preservation_error:.6e}"
+            f"Maximum difference: {preservation_error:.6e}; "
+            f"tolerance: "
+            f"{OBSERVED_PRESERVATION_TOLERANCE:.6e}."
         )
 
     # =================================================================
@@ -1395,53 +1409,35 @@ def run_single_experiment(
     # =================================================================
 
     reconstruction_np = (
-        reconstruction
-        .detach()
+        reconstruction.detach()
         .cpu()
         .numpy()
         .astype(np.float64)
     )
 
     target_np = (
-        target_cube
-        .detach()
+        target_cube.detach()
         .cpu()
         .numpy()
         .astype(np.float64)
     )
 
     # =================================================================
-    # REMOVE CHANNEL DIMENSION
-    #
-    # The controlled experiment uses one channel.
+    # REMOVE SINGLE CHANNEL DIMENSION
     # =================================================================
 
-    reconstruction_volume = (
-        reconstruction_np[0]
-    )
-
-    target_volume = (
-        target_np[0]
-    )
-
-    mask_volume = (
-        mask_np[0]
-    )
+    reconstruction_volume = reconstruction_np[0]
+    target_volume = target_np[0]
+    mask_volume = mask_np[0]
 
     # =================================================================
     # CALCULATE METRICS
     # =================================================================
 
     metrics = calculate_metrics(
-        prediction=(
-            reconstruction_volume
-        ),
-        target=(
-            target_volume
-        ),
-        mask=(
-            mask_volume
-        ),
+        prediction=reconstruction_volume,
+        target=target_volume,
+        mask=mask_volume,
     )
 
     # =================================================================
@@ -1450,51 +1446,26 @@ def run_single_experiment(
 
     return {
         "Case_ID": case_id,
-        "geological_mode": (
-            geological_mode
-        ),
-        "mask_mode": (
-            mask_mode
-        ),
-        "requested_missing_rate": (
-            missing_rate
-        ),
-        "actual_missing_rate": (
-            actual_missing_rate
-        ),
+        "geological_mode": geological_mode,
+        "mask_mode": mask_mode,
+        "requested_missing_rate": missing_rate,
+        "actual_missing_rate": actual_missing_rate,
         "seed": seed,
-        "cube_depth": (
-            BASELINE_CUBE_SIZE[0]
-        ),
-        "cube_height": (
-            BASELINE_CUBE_SIZE[1]
-        ),
-        "cube_width": (
-            BASELINE_CUBE_SIZE[2]
-        ),
+        "cube_depth": BASELINE_CUBE_SIZE[0],
+        "cube_height": BASELINE_CUBE_SIZE[1],
+        "cube_width": BASELINE_CUBE_SIZE[2],
         "MAE": metrics["MAE"],
         "RMSE": metrics["RMSE"],
         "PSNR": metrics["PSNR"],
         "SNR": metrics["SNR"],
         "SSIM": metrics["SSIM"],
-        "Missing_MAE": (
-            metrics["Missing_MAE"]
-        ),
-        "Missing_RMSE": (
-            metrics["Missing_RMSE"]
-        ),
-        "Runtime_seconds": (
-            runtime_seconds
-        ),
-        "Observed_Preservation_Error": (
-            preservation_error
-        ),
-        "Observed_Preservation_Pass": (
-            preservation_pass
-        ),
+        "Missing_MAE": metrics["Missing_MAE"],
+        "Missing_RMSE": metrics["Missing_RMSE"],
+        "Runtime_seconds": runtime_seconds,
+        "Observed_Preservation_Error": preservation_error,
+        "Observed_Preservation_Pass": preservation_pass,
         "status": "SUCCESS",
     }
-
 
 # =====================================================================
 # SUMMARY STATISTICS
