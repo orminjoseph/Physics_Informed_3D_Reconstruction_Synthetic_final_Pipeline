@@ -357,6 +357,7 @@ def run_single_experiment(
         target,
         mask,
         velocity,
+        pressure_wavefield,
         actual_mask_mode,
         actual_geological_mode,
     ) = dataset[0]
