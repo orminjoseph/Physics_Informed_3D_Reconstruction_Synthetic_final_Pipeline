@@ -6,7 +6,7 @@
 Physics-Informed 3D Encoder-Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction.
 
-Purpose
+Purpose(s)
 -------
 This class provides deterministic inference for the final
 Physics-Informed 3D Encoder-Decoder network.

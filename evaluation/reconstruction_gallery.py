@@ -148,22 +148,37 @@ def validate_tensor(tensor, name, expected_ndim=None):
         raise ValueError(f"{name} contains NaN or Inf values.")
 
 
+
 # =====================================================================
 # CONVERT TENSOR TO NUMPY
 # =====================================================================
 
 def tensor_to_numpy(tensor):
-    """Detach a tensor and convert it to a CPU NumPy array."""
+    """
+    Convert a PyTorch tensor or NumPy array to a NumPy array.
+
+    PyTorch tensors are detached from the computation graph and
+    moved to the CPU before conversion.
+
+    Accepted inputs:
+        - torch.Tensor
+        - numpy.ndarray
+
+    Returns:
+        numpy.ndarray
+    """
 
     if isinstance(tensor, torch.Tensor):
-        tensor = tensor.detach().cpu()
+        return tensor.detach().cpu().numpy()
 
-    if not isinstance(tensor, np.ndarray):
-        raise TypeError(
-            "Expected a torch.Tensor or numpy.ndarray."
-        )
+    if isinstance(tensor, np.ndarray):
+        return tensor
 
-    return tensor
+    raise TypeError(
+        "tensor_to_numpy() expected a torch.Tensor or "
+        "numpy.ndarray, but received "
+        f"{type(tensor).__name__}."
+    )
 
 
 # =====================================================================
@@ -172,24 +187,35 @@ def tensor_to_numpy(tensor):
 
 def extract_dataset_sample(sample):
     """
-    Dataset convention:
+    Extract corrupted input, ground truth and observation mask.
+
+    Expected dataset convention:
         sample[0] = corrupted seismic input
         sample[1] = ground-truth seismic volume
         sample[2] = observation mask
+
+    Returns:
+        corrupted, target, mask
     """
 
     if not isinstance(sample, (tuple, list)):
         raise TypeError(
-            "Dataset sample must be a tuple or list."
+            "Dataset sample must be a tuple or list. "
+            f"Received {type(sample).__name__}."
         )
 
     if len(sample) < 3:
         raise ValueError(
-            "Dataset sample must contain input, target and mask."
+            "Dataset sample must contain at least three items: "
+            "input, target and observation mask. "
+            f"Received {len(sample)} items."
         )
 
-    return sample[0], sample[1], sample[2]
+    corrupted = sample[0]
+    target = sample[1]
+    mask = sample[2]
 
+    return corrupted, target, mask
 
 # =====================================================================
 # PREPARE MODEL INPUT
