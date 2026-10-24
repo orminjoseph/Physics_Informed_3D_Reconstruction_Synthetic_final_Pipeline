@@ -149,12 +149,11 @@ from utils.config import (
 # PROJECT ROOT
 # =====================================================================
 
-# This script is located in evaluation/.
-# parents[0] = evaluation/
-# parents[1] = project root/
-PROJECT_ROOT = (
-    Path(__file__).resolve().parents[1]
-)
+# This script is located in evaluation/baselines/.
+# parents[0] = evaluation/baselines/
+# parents[1] = evaluation/
+# parents[2] = project root/
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 # =====================================================================

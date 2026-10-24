@@ -4,6 +4,7 @@
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/outputs" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.12 (Physics_Informed_3D_Reconstruction_Synthetic_final_Pipeline) (2)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
