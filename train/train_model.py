@@ -1,47 +1,20 @@
+
 """
 ======================================================================
 FINAL TRAINING ENTRY POINT
 ======================================================================
 
-Physics-Informed 3D Encoder–Decoder Framework
+Physics-Informed 3D Encoder-Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction
 
-This module is responsible for:
+This module performs final-model training only.
 
-    1. Resolving the computational device.
-    2. Building the configured training dataset.
-    3. Creating the deterministic training/validation split.
-    4. Creating training and validation DataLoaders.
-    5. Constructing the final 3D Encoder–Decoder model.
-    6. Constructing the complete TotalLoss.
-    7. Constructing the optimizer.
-    8. Creating the Trainer.
-    9. Starting or resuming model training.
-   10. Reporting the location of the resulting checkpoint.
+The independent controlled evaluation matrix is executed separately.
 
-IMPORTANT
----------
-This module performs TRAINING only.
+Physics constraint:
+    Acoustic wave equation only.
 
-The controlled 750-case evaluation matrix is NOT generated here.
-
-The intended project workflow is:
-
-    Training dataset
-          |
-          v
-    Train final model
-          |
-          v
-    best_model.pth
-          |
-          v
-    Independent evaluation
-          |
-          v
-    750 controlled cases
-
-The master project pipeline controls whether training is executed.
+No Eikonal implementation is used in this training entry point.
 
 Author: Ormin Joseph
 ======================================================================
@@ -63,10 +36,15 @@ from models.network import Network3D
 
 from losses.total_loss import TotalLoss
 
+# If your acoustic loss file has a different name, adjust
+# this import to match its actual filename.
+from losses.physics_loss import (
+    AcousticWaveEquationLoss,
+)
+
 from trainer.trainer import Trainer
 
 from utils.experiment_manager import ExperimentManager
-
 from utils import config
 
 
@@ -75,19 +53,10 @@ from utils import config
 # ======================================================================
 
 def set_global_seed(seed: int) -> None:
-    """
-    Set the random seeds used by the training entry point.
-
-    The dataset itself is responsible for its own sample-level
-    deterministic generation. This function establishes reproducibility
-    for the training process and any remaining Python/NumPy/PyTorch
-    randomness.
-    """
+    """Set Python, NumPy, and PyTorch random seeds."""
 
     random.seed(seed)
-
     np.random.seed(seed)
-
     torch.manual_seed(seed)
 
     if torch.cuda.is_available():
@@ -99,43 +68,26 @@ def set_global_seed(seed: int) -> None:
 # ======================================================================
 
 def resolve_device() -> torch.device:
-    """
-    Resolve config.DEVICE into a valid torch.device.
-
-    Supported configuration policies:
-
-        "auto"
-        "cuda"
-        "cpu"
-
-    "auto" selects CUDA when available and otherwise CPU.
-    """
+    """Resolve the configured computational device."""
 
     configured_device = str(config.DEVICE).lower().strip()
 
     if configured_device == "auto":
-
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-
-        return torch.device("cpu")
+        return torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
 
     if configured_device == "cuda":
-
         if not torch.cuda.is_available():
             print(
-                "WARNING: DEVICE='cuda' was requested, "
-                "but CUDA is unavailable."
+                "WARNING: CUDA was requested but is unavailable. "
+                "Falling back to CPU."
             )
-
-            print("Falling back to CPU.")
-
             return torch.device("cpu")
 
         return torch.device("cuda")
 
     if configured_device == "cpu":
-
         return torch.device("cpu")
 
     raise ValueError(
@@ -149,44 +101,58 @@ def resolve_device() -> torch.device:
 # ======================================================================
 
 def validate_training_configuration() -> None:
-    """
-    Validate the minimum configuration required by the training stage.
+    """Validate the configuration required for training."""
 
-    The complete configuration validator remains in utils/config.py.
-    This function performs only training-stage checks.
-    """
+    if hasattr(config, "validate_config"):
+        result = config.validate_config()
+
+        if result is False:
+            raise ValueError(
+                "The project configuration validation failed."
+            )
 
     if config.BATCH_SIZE < 1:
-        raise ValueError(
-            "BATCH_SIZE must be greater than or equal to 1."
-        )
+        raise ValueError("BATCH_SIZE must be at least 1.")
 
     if config.NUM_EPOCHS < 1:
-        raise ValueError(
-            "NUM_EPOCHS must be greater than or equal to 1."
-        )
+        raise ValueError("NUM_EPOCHS must be at least 1.")
 
     if config.LEARNING_RATE <= 0:
-        raise ValueError(
-            "LEARNING_RATE must be greater than 0."
-        )
+        raise ValueError("LEARNING_RATE must be positive.")
 
     if config.WEIGHT_DECAY < 0:
-        raise ValueError(
-            "WEIGHT_DECAY cannot be negative."
-        )
+        raise ValueError("WEIGHT_DECAY cannot be negative.")
 
     if not 0.0 < config.VALIDATION_SPLIT < 1.0:
         raise ValueError(
             "VALIDATION_SPLIT must be between 0 and 1."
         )
 
-    if config.DATASET_MODE not in {
-        "synthetic",
-        "f3",
-    }:
+    if config.DATASET_MODE not in {"synthetic", "f3"}:
         raise ValueError(
             f"Unsupported DATASET_MODE: {config.DATASET_MODE!r}."
+        )
+
+    # This project uses acoustic wave-equation physics only.
+    if config.PHYSICS_TYPE != "acoustic_wave_equation":
+        raise ValueError(
+            "This training entry point requires "
+            "PHYSICS_TYPE='acoustic_wave_equation'."
+        )
+
+    if not config.USE_PHYSICS_LOSS:
+        raise ValueError(
+            "USE_PHYSICS_LOSS must be True for this experiment."
+        )
+
+    if not config.USE_ACOUSTIC_WAVE_EQUATION_LOSS:
+        raise ValueError(
+            "USE_ACOUSTIC_WAVE_EQUATION_LOSS must be True."
+        )
+
+    if config.LOSS_WEIGHTS.get("physics", 0.0) <= 0:
+        raise ValueError(
+            "LOSS_WEIGHTS['physics'] must be positive."
         )
 
 
@@ -195,20 +161,7 @@ def validate_training_configuration() -> None:
 # ======================================================================
 
 def train_final_model():
-    """
-    Execute the complete final-model training stage.
-
-    Returns
-    -------
-    Trainer
-        The completed Trainer instance.
-
-    Notes
-    -----
-    This function does not run the independent controlled evaluation
-    matrix. Evaluation is performed after the best checkpoint has been
-    produced.
-    """
+    """Build the model and execute final-model training."""
 
     print()
     print("=" * 78)
@@ -216,19 +169,14 @@ def train_final_model():
     print("=" * 78)
 
     # ------------------------------------------------------------------
-    # 1. Validate the training configuration.
+    # 1. Validate configuration and establish reproducibility.
     # ------------------------------------------------------------------
 
     validate_training_configuration()
-
-    # ------------------------------------------------------------------
-    # 2. Establish reproducibility.
-    # ------------------------------------------------------------------
-
     set_global_seed(config.SEED)
 
     # ------------------------------------------------------------------
-    # 3. Resolve computational device.
+    # 2. Resolve device.
     # ------------------------------------------------------------------
 
     device = resolve_device()
@@ -241,14 +189,11 @@ def train_final_model():
     print(f"Learning rate       : {config.LEARNING_RATE}")
     print(f"Weight decay        : {config.WEIGHT_DECAY}")
     print(f"Validation split    : {config.VALIDATION_SPLIT}")
-    print(f"Configured device   : {config.DEVICE}")
     print(f"Resolved device     : {device}")
+    print(f"Physics type        : {config.PHYSICS_TYPE}")
 
     # ------------------------------------------------------------------
-    # 4. Build the configured dataset.
-    #
-    # build_dataset() is responsible for routing to the appropriate
-    # dataset implementation according to DATASET_MODE.
+    # 3. Build dataset.
     # ------------------------------------------------------------------
 
     print()
@@ -258,25 +203,15 @@ def train_final_model():
 
     dataset = build_dataset()
 
-    if dataset is None:
+    if dataset is None or len(dataset) == 0:
         raise RuntimeError(
-            "build_dataset() returned None. "
-            "Training cannot continue."
-        )
-
-    if len(dataset) == 0:
-        raise RuntimeError(
-            "The training dataset is empty."
+            "The dataset is empty or build_dataset() returned None."
         )
 
     print(f"Dataset size        : {len(dataset)}")
 
     # ------------------------------------------------------------------
-    # 5. Create the deterministic training/validation split.
-    #
-    # split_dataset() contains the project's coverage-aware splitting
-    # logic and is therefore used instead of implementing another split
-    # here.
+    # 4. Create deterministic training/validation split.
     # ------------------------------------------------------------------
 
     print()
@@ -284,30 +219,19 @@ def train_final_model():
     print("CREATING TRAINING / VALIDATION SPLIT")
     print("-" * 78)
 
-    train_dataset, validation_dataset = split_dataset(
-        dataset
-    )
-
+    train_dataset, validation_dataset = split_dataset(dataset)
 
     if len(train_dataset) == 0:
-        raise RuntimeError(
-            "The training split is empty."
-        )
+        raise RuntimeError("The training split is empty.")
 
     if len(validation_dataset) == 0:
-        raise RuntimeError(
-            "The validation split is empty."
-        )
+        raise RuntimeError("The validation split is empty.")
 
     print(f"Training samples    : {len(train_dataset)}")
     print(f"Validation samples  : {len(validation_dataset)}")
 
     # ------------------------------------------------------------------
-    # 6. Create DataLoaders.
-    #
-    # Training data is shuffled.
-    #
-    # Validation data is deterministic and is not shuffled.
+    # 5. Create DataLoaders.
     # ------------------------------------------------------------------
 
     print()
@@ -328,58 +252,79 @@ def train_final_model():
     )
 
     if len(train_loader) == 0:
-        raise RuntimeError(
-            "The training DataLoader contains no batches."
-        )
+        raise RuntimeError("The training DataLoader has no batches.")
 
     if len(validation_loader) == 0:
         raise RuntimeError(
-            "The validation DataLoader contains no batches."
+            "The validation DataLoader has no batches."
         )
 
     print(f"Training batches    : {len(train_loader)}")
     print(f"Validation batches  : {len(validation_loader)}")
 
     # ------------------------------------------------------------------
-    # 7. Construct the final 3D Encoder–Decoder model.
-    #
-    # All architectural switches come from utils.config.
+    # 6. Construct the 3D Encoder-Decoder model.
     # ------------------------------------------------------------------
 
     print()
     print("-" * 78)
-    print("BUILDING 3D ENCODER–DECODER MODEL")
+    print("BUILDING 3D ENCODER-DECODER MODEL")
     print("-" * 78)
+
 
     model = Network3D(
         use_attention=config.USE_ATTENTION,
         use_residual=config.USE_RESIDUAL,
         use_uncertainty=config.USE_UNCERTAINTY,
+        pressure_time_steps=config.ACOUSTIC_TIME_STEPS,
+    ).to(device)
+    print(f"Attention enabled   : {config.USE_ATTENTION}")
+    print(f"Residual enabled    : {config.USE_RESIDUAL}")
+    print(f"Uncertainty enabled : {config.USE_UNCERTAINTY}")
+
+    print(
+        f"Acoustic pressure time steps: "
+        f"{model.pressure_time_steps}"
     )
+    # ------------------------------------------------------------------
+    # 7. Construct the acoustic wave-equation loss.
+    #
+    # The acoustic loss evaluates:
+    #
+    #     (1 / v^2) * d2p/dt2 - Laplacian(p) - s
+    #
+    # Required physical inputs:
+    #     pressure : [B, 1, T, D, H, W]
+    #     velocity : [B, 1, D, H, W]
+    #     source   : [B, 1, T, D, H, W]
+    #
+    # The Trainer and dataset must supply physically compatible tensors.
+    # ------------------------------------------------------------------
 
-    model = model.to(device)
+    print()
+    print("-" * 78)
+    print("BUILDING ACOUSTIC WAVE-EQUATION LOSS")
+    print("-" * 78)
 
-    print(f"Attention enabled  : {config.USE_ATTENTION}")
-    print(f"Residual enabled   : {config.USE_RESIDUAL}")
-    print(f"Uncertainty enabled: {config.USE_UNCERTAINTY}")
+    acoustic_loss = AcousticWaveEquationLoss(
+        dt=config.ACOUSTIC_DT,
+        dx=config.ACOUSTIC_DX,
+        dy=config.ACOUSTIC_DY,
+        dz=config.ACOUSTIC_DZ,
+    ).to(device)
+
+    print(f"Acoustic dt         : {config.ACOUSTIC_DT}")
+    print(f"Acoustic dx         : {config.ACOUSTIC_DX}")
+    print(f"Acoustic dy         : {config.ACOUSTIC_DY}")
+    print(f"Acoustic dz         : {config.ACOUSTIC_DZ}")
 
     # ------------------------------------------------------------------
-    # 8. Construct the complete TotalLoss.
+    # 8. Construct TotalLoss and connect the acoustic loss.
     #
     # IMPORTANT:
-    #
-    # The actual TotalLoss constructor accepts:
-    #
-    #     loss_weights
-    #     physics_loss_weights
-    #     data_range
-    #     log_variance_min
-    #     log_variance_max
-    #
-    # It does NOT accept dx, dy, or dz as constructor arguments.
-    #
-    # Grid spacing is already handled by the physics-loss implementation
-    # through the appropriate configuration/interface.
+    # TotalLoss receives acoustic_loss explicitly.
+    # Do not pass physics_loss_weights unless the TotalLoss constructor
+    # has specifically been updated to accept that argument.
     # ------------------------------------------------------------------
 
     print()
@@ -389,22 +334,18 @@ def train_final_model():
 
     criterion = TotalLoss(
         loss_weights=config.LOSS_WEIGHTS,
-        physics_loss_weights=config.PHYSICS_LOSS_WEIGHTS,
         data_range=config.SEISMIC_DATA_RANGE,
+        acoustic_loss=acoustic_loss,
         log_variance_min=config.LOG_VARIANCE_MIN,
         log_variance_max=config.LOG_VARIANCE_MAX,
-    )
-
-    criterion = criterion.to(device)
+    ).to(device)
 
     print(f"Loss weights        : {config.LOSS_WEIGHTS}")
-    print(
-        "Physics loss weights: "
-        f"{config.PHYSICS_LOSS_WEIGHTS}"
-    )
+    print("Physics constraint  : Acoustic wave equation")
+    print("Acoustic loss linked: Yes")
 
     # ------------------------------------------------------------------
-    # 9. Construct the optimizer.
+    # 9. Construct optimizer.
     # ------------------------------------------------------------------
 
     print()
@@ -423,10 +364,7 @@ def train_final_model():
     print(f"Weight decay        : {config.WEIGHT_DECAY}")
 
     # ------------------------------------------------------------------
-    # 10. Create the ExperimentManager.
-    #
-    # The ExperimentManager owns the experiment-level output structure
-    # and checkpoint/report management.
+    # 10. Initialize experiment manager.
     # ------------------------------------------------------------------
 
     print()
@@ -435,10 +373,6 @@ def train_final_model():
     print("-" * 78)
 
     experiment_manager = ExperimentManager()
-
-    # ------------------------------------------------------------------
-    # 11. Verify the experiment checkpoint directory.
-    # ------------------------------------------------------------------
 
     checkpoint_directory = Path(
         experiment_manager.checkpoints
@@ -449,26 +383,10 @@ def train_final_model():
         exist_ok=True,
     )
 
-    print(
-        f"Checkpoint directory: "
-        f"{checkpoint_directory}"
-    )
+    print(f"Checkpoint directory: {checkpoint_directory}")
 
     # ------------------------------------------------------------------
-    # 12. Create the Trainer.
-    #
-    # The Trainer owns:
-    #
-    #     - training loop
-    #     - validation loop
-    #     - checkpoint creation
-    #     - history
-    #     - gradient handling
-    #     - early stopping
-    #     - TensorBoard/logging
-    #
-    # Therefore these responsibilities are deliberately not duplicated
-    # here.
+    # 11. Initialize Trainer.
     # ------------------------------------------------------------------
 
     print()
@@ -485,14 +403,7 @@ def train_final_model():
     )
 
     # ------------------------------------------------------------------
-    # 13. Start or resume training.
-    #
-    # RESUME_EVALUATION is intentionally unrelated to training resume.
-    # Training resume is controlled here by the existence of a previous
-    # training checkpoint and the Trainer's resume mechanism.
-    #
-    # The master pipeline decides whether this function is called at
-    # all through RUN_TRAINING.
+    # 12. Start or resume training.
     # ------------------------------------------------------------------
 
     print()
@@ -506,8 +417,9 @@ def train_final_model():
         epochs=config.NUM_EPOCHS,
         resume=True,
     )
+
     # ------------------------------------------------------------------
-    # 14. Verify that the expected best checkpoint exists.
+    # 13. Verify the expected best checkpoint.
     # ------------------------------------------------------------------
 
     best_checkpoint = (
@@ -520,33 +432,23 @@ def train_final_model():
     print("-" * 78)
 
     if not best_checkpoint.exists():
-
         raise FileNotFoundError(
             "Training completed but the expected best checkpoint "
             f"was not found:\n{best_checkpoint}"
         )
 
     if best_checkpoint.stat().st_size == 0:
-
         raise RuntimeError(
             "The best checkpoint exists but is empty:\n"
             f"{best_checkpoint}"
         )
 
-    print(
-        f"Best checkpoint    : {best_checkpoint}"
-    )
+    print(f"Best checkpoint     : {best_checkpoint}")
 
     print()
     print("=" * 78)
     print("FINAL MODEL TRAINING COMPLETED")
     print("=" * 78)
-
-    print(
-        f"Best checkpoint:\n{best_checkpoint}"
-    )
-
-    print()
 
     return trainer
 
@@ -562,29 +464,16 @@ if __name__ == "__main__":
     print("TRAINING ENTRY POINT")
     print("=" * 78)
 
-    # --------------------------------------------------------------
-    # RUN_TRAINING is the master safety switch.
-    #
-    # When False, executing this module must NOT accidentally retrain
-    # the model.
-    # --------------------------------------------------------------
-
+    # Master safety switch: prevent accidental training.
     if not config.RUN_TRAINING:
 
         print()
+        print("RUN_TRAINING=False")
+        print("Training has NOT been started.")
         print(
-            "RUN_TRAINING=False"
-        )
-
-        print(
-            "Training has NOT been started."
-        )
-
-        print(
-            "Set RUN_TRAINING=True only when the "
+            "Set RUN_TRAINING=True only after the "
             "pre-training integration checks have passed."
         )
 
     else:
-
         train_final_model()

@@ -95,6 +95,7 @@ from evaluation.evaluator import Evaluator
 # ======================================================================
 # 7. CENTRALIZED PROJECT CONFIGURATION
 # ======================================================================
+from utils import config
 
 from utils.config import (
     DATASET_MODE,
@@ -646,6 +647,7 @@ def main():
         use_attention=USE_ATTENTION,
         use_residual=USE_RESIDUAL,
         use_uncertainty=USE_UNCERTAINTY,
+        pressure_time_steps=config.ACOUSTIC_TIME_STEPS,
     )
 
     print()

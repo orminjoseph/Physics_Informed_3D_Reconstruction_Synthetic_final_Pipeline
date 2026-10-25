@@ -1,11 +1,12 @@
+
 # =========================================================
 # PHYSICS-INFORMED 3D SEISMIC RECONSTRUCTION
 # GLOBAL CONFIGURATION FILE
 # =========================================================
 
 """
-Global configuration for the complete
-Physics-Informed 3D Seismic Reconstruction project.
+Global configuration for the acoustic-wave-equation
+synthetic seismic reconstruction experiment.
 
 Research framework
 ------------------
@@ -14,76 +15,38 @@ Physics-Informed 3D Encoder-Decoder Framework
 with Predictive Uncertainty for Seismic Data
 Reconstruction in Complex Geological Settings.
 
-This file centralizes all major project parameters.
+Physical constraint
+-------------------
 
-Configuration categories
-------------------------
+    (1 / v^2) * d^2p/dt^2 - Laplacian(p) = s
 
-1. Dataset configuration
-2. Synthetic dataset configuration
-3. F3 dataset configuration
-4. Common baseline configuration
-5. Training configuration
-6. Validation configuration
-7. Checkpoint configuration
-8. Early-stopping configuration
-9. Uncertainty evaluation
-10. Robustness evaluation
-11. Statistical significance
-12. Geological complexity evaluation
-13. Final reporting
-14. Master pipeline control
-15. Controlled experimental matrix
-16. Curvelet POCS configuration
-17. Model configuration
-18. Physics configuration
-19. Composite-loss weights
-20. Physics-loss weights
-21. Physical seismic sampling
-22. Travel-time configuration
-23. Velocity-model configuration
-24. Seismic amplitude normalization
-25. Mask configuration
-26. DataLoader configuration
-27. Mixed-precision configuration
-28. Device configuration
-29. Output configuration
-30. Reproducibility
-31. Configuration validation
+where:
+    p = acoustic pressure wavefield
+    v = P-wave velocity [m/s]
+    t = physical time [s]
+    s = source term
+
+The physics-informed objective uses the acoustic wave equation
+only. No Eikonal or travel-time physics loss is configured.
 
 Tensor convention
 -----------------
 
-All seismic volumes use:
-
+Seismic volumes:
     [B, C, D, H, W]
 
 where:
-
     B = batch size
     C = channel
     D = depth
     H = crossline
     W = inline
 
-Individual dataset samples use:
-
+Individual dataset samples:
     [C, D, H, W]
 
-Important physics convention
-----------------------------
-
-The Eikonal equation is:
-
-    |∇T|² = 1 / V²
-
-where:
-
-    T = seismic travel time [s]
-    V = P-wave velocity [m/s]
-
-The velocity model supplied to the physics loss must therefore
-represent physically meaningful P-wave velocity.
+Pressure wavefield convention:
+    [B, 1, T, D, H, W]
 
 Author: Ormin Joseph
 """
@@ -96,9 +59,8 @@ Author: Ormin Joseph
 DATASET_MODE = "synthetic"
 
 # Supported modes:
-#
-# DATASET_MODE = "synthetic"
-# DATASET_MODE = "f3"
+# "synthetic"
+# "f3"
 
 
 # =========================================================
@@ -112,23 +74,10 @@ EXPERIMENT_NAME = "synthetic_training"
 # 3. SYNTHETIC DATASET CONFIGURATION
 # =========================================================
 
-# Number of synthetic seismic volumes.
+SYNTHETIC_NUM_SAMPLES = 10
 
-SYNTHETIC_NUM_SAMPLES = 50
-
-
-# Synthetic seismic cube dimensions:
-#
-#     [Depth, Crossline, Inline]
-
-SYNTHETIC_PATCH_SIZE = (
-    64,
-    128,
-    128,
-)
-
-
-# Probability that seismic samples/voxels are removed.
+# [Depth, Crossline, Inline]
+SYNTHETIC_PATCH_SIZE = (64, 128, 128)
 
 SYNTHETIC_MISSING_PROBABILITY = 0.30
 
@@ -146,30 +95,11 @@ F3_PATH = (
     r"\Seismic_data.sgy"
 )
 
+# [Depth, Crossline, Inline]
+F3_PATCH_SIZE = (64, 64, 64)
 
-# F3 patch dimensions:
-#
-#     [Depth, Crossline, Inline]
-
-F3_PATCH_SIZE = (
-    64,
-    64,
-    64,
-)
-
-
-# F3 patch extraction stride:
-#
-#     [Depth, Crossline, Inline]
-
-F3_STRIDE = (
-    64,
-    64,
-    64,
-)
-
-
-# Missing-data probability for F3 experiments.
+# [Depth, Crossline, Inline]
+F3_STRIDE = (64, 64, 64)
 
 F3_MISSING_PROBABILITY = 0.30
 
@@ -178,44 +108,18 @@ F3_MISSING_PROBABILITY = 0.30
 # 5. COMMON BASELINE COMPARISON CONFIGURATION
 # =========================================================
 
-# Number of samples used in the common seven-method
-# reconstruction comparison.
-
 BASELINE_NUM_SAMPLES = 1
 
-
-# Controlled benchmark cube:
-#
-#     [Depth, Crossline, Inline]
-
-BASELINE_CUBE_SIZE = (
-    64,
-    128,
-    128,
-)
-
-
-# Missing-data probability.
+# [Depth, Crossline, Inline]
+BASELINE_CUBE_SIZE = (64, 128, 128)
 
 BASELINE_MISSING_RATE = 0.30
 
-
-# Geological structure.
-
 BASELINE_GEOLOGICAL_MODE = "folded"
-
-
-# Missing-data mechanism.
 
 BASELINE_MASK_MODE = "missing_crosslines"
 
-
-# Reproducibility seed.
-
 BASELINE_SEED = 42
-
-
-# Maximum acceptable observed-data preservation error.
 
 OBSERVED_PRESERVATION_TOLERANCE = 1.0e-6
 
@@ -258,46 +162,21 @@ PATIENCE = 15
 # 10. UNCERTAINTY EVALUATION CONFIGURATION
 # =========================================================
 
-# Number of patches/samples used for uncertainty evaluation.
-#
-# None = evaluate all available samples.
-# Integer = evaluate the specified number.
+# None means use all available samples.
 
 UNCERTAINTY_EVALUATION_NUM_SAMPLES = None
 
-
-# Deterministic uncertainty-evaluation seed.
-
 UNCERTAINTY_EVALUATION_SEED = 42
 
-
-# Maximum number of voxel pairs used for uncertainty/error
-# correlation analysis.
-#
-# None = use all eligible voxels.
-
+# None means use all eligible voxels.
 UNCERTAINTY_CORRELATION_MAX_VOXELS = 500000
-
-
-# Evaluate uncertainty separately in missing regions.
 
 EVALUATE_MISSING_REGION_UNCERTAINTY = True
 
-
-# Evaluate uncertainty separately in observed regions.
-
 EVALUATE_OBSERVED_REGION_UNCERTAINTY = True
 
-
-# Number of dataset patches used for uncertainty-error
-# correlation analysis.
-#
-# None = analyse all available patches.
-
+# None means analyse all available patches.
 UNCERTAINTY_ERROR_CORRELATION_NUM_PATCHES = None
-
-
-# Reproducibility seed for uncertainty-error correlation.
 
 UNCERTAINTY_ERROR_CORRELATION_SEED = 42
 
@@ -306,8 +185,7 @@ UNCERTAINTY_ERROR_CORRELATION_SEED = 42
 # 11. NOISE ROBUSTNESS EVALUATION
 # =========================================================
 
-# Gaussian noise standard deviations in the normalized
-# seismic amplitude scale.
+# Noise standard deviations in normalized amplitude units.
 
 NOISE_ROBUSTNESS_LEVELS = (
     0.00,
@@ -317,15 +195,7 @@ NOISE_ROBUSTNESS_LEVELS = (
     0.20,
 )
 
-
-# Number of samples evaluated at each noise level.
-#
-# None = evaluate all available samples.
-
 NOISE_ROBUSTNESS_NUM_SAMPLES = 20
-
-
-# Reproducibility seed.
 
 NOISE_ROBUSTNESS_SEED = 42
 
@@ -342,13 +212,7 @@ MISSING_DATA_ROBUSTNESS_LEVELS = (
     0.50,
 )
 
-
-# Number of samples evaluated at each missing-data level.
-
 MISSING_DATA_ROBUSTNESS_NUM_SAMPLES = 20
-
-
-# Reproducibility seed.
 
 MISSING_DATA_ROBUSTNESS_SEED = 42
 
@@ -372,8 +236,6 @@ EFFECT_SIZE = "Cohen_dz"
 # 14. GEOLOGICAL COMPLEXITY ROBUSTNESS
 # =========================================================
 
-# Increasing structural complexity.
-
 GEOLOGICAL_COMPLEXITY_LEVELS = (
     "horizontal",
     "dipping",
@@ -383,23 +245,11 @@ GEOLOGICAL_COMPLEXITY_LEVELS = (
     "highly_complex",
 )
 
-
-# Number of independently masked test cases per structure.
-
 GEOLOGICAL_COMPLEXITY_NUM_SAMPLES = 5
-
-
-# Missing-data probability.
 
 GEOLOGICAL_COMPLEXITY_MISSING_PROBABILITY = 0.30
 
-
-# Number of patches evaluated for non-synthetic datasets.
-
 GEOLOGICAL_COMPLEXITY_DATASET_SAMPLES = 20
-
-
-# Reproducibility seed.
 
 GEOLOGICAL_COMPLEXITY_SEED = 42
 
@@ -410,9 +260,7 @@ GEOLOGICAL_COMPLEXITY_SEED = 42
 
 FINAL_REPORT_FILENAME = "final_report.txt"
 
-FINAL_REPORT_METADATA_FILENAME = (
-    "final_report_metadata.json"
-)
+FINAL_REPORT_METADATA_FILENAME = "final_report_metadata.json"
 
 
 # =========================================================
@@ -426,16 +274,7 @@ GALLERY_NUMBER_OF_SAMPLES = 5
 # 17. MASTER PIPELINE CONTROL
 # =========================================================
 
-# ---------------------------------------------------------
-# TRAINING CONTROL
-# ---------------------------------------------------------
-
 RUN_TRAINING = True
-
-
-# ---------------------------------------------------------
-# EVALUATION CONTROL
-# ---------------------------------------------------------
 
 RESUME_EVALUATION = True
 
@@ -447,27 +286,20 @@ FORCE_RERUN_EVALUATION = False
 # =========================================================
 
 """
-Complete controlled experimental matrix:
+Planned full experimental matrix:
 
     6 geological structures
-    × 5 missing mechanisms
-    × 5 missing-data rates
-    × 5 random seeds
+    x 5 missing mechanisms
+    x 5 missing-data rates
+    x 5 random seeds
 
-Total:
+Total: 750 cases.
 
-    6 × 5 × 5 × 5 = 750 cases
-
-During development:
-
-    CONTROLLED_MATRIX_CASE_LIMIT = 10
-
-For the final PhD experiment:
-
-    CONTROLLED_MATRIX_CASE_LIMIT = None
+Use a finite case limit during development.
+Set the limit to None for the full matrix.
 """
 
-CONTROLLED_MATRIX_CASE_LIMIT = 50
+CONTROLLED_MATRIX_CASE_LIMIT = 10
 
 
 # =========================================================
@@ -491,22 +323,11 @@ CURVELET_TOLERANCE = 1.0e-5
 # 20. MODEL CONFIGURATION
 # =========================================================
 
-# Attention gates.
-
 USE_ATTENTION = True
-
-
-# Residual connections.
 
 USE_RESIDUAL = True
 
-
-# Predictive uncertainty.
-
 USE_UNCERTAINTY = True
-
-
-# Number of stochastic forward passes for MC Dropout.
 
 MC_DROPOUT_SAMPLES = 20
 
@@ -515,50 +336,86 @@ MC_DROPOUT_SAMPLES = 20
 # 21. UNCERTAINTY MODEL PARAMETERS
 # =========================================================
 
-# Lower and upper limits for predicted log variance.
-
 LOG_VARIANCE_MIN = -10.0
 
 LOG_VARIANCE_MAX = 10.0
 
 
 # =========================================================
-# 22. PHYSICS-INFORMED CONFIGURATION
+# 22. ACOUSTIC PHYSICS CONFIGURATION
 # =========================================================
 
+# Enable the acoustic wave-equation physics loss.
 USE_PHYSICS_LOSS = True
 
+# Acoustic wave equation:
+#
+#     (1/v^2) * d^2p/dt^2 - Laplacian(p) = s
+#
+# The pressure wavefield, velocity model, and source must
+# be supplied by the acoustic synthetic data pipeline.
 
-# Source coordinates are currently unavailable.
+PHYSICS_TYPE = "acoustic_wave_equation"
 
-USE_SOURCE_LOSS = False
-
-
-# Independent travel-time targets are currently unavailable.
-
-USE_TRAVEL_TIME_LOSS = False
-
-
-# Eikonal physics remains active.
-
-USE_EIKONAL_LOSS = True
+USE_ACOUSTIC_WAVE_EQUATION_LOSS = True
 
 
 # =========================================================
-# 23. COMPOSITE LOSS WEIGHTS
+# 23. ACOUSTIC SIMULATION PARAMETERS
+# =========================================================
+
+# Temporal sampling interval [seconds].
+ACOUSTIC_DT = 0.0005
+
+# Spatial grid intervals [metres].
+#
+# Keep these separate from the general DX, DY, and DZ
+# settings. These values must agree with the acoustic
+# solver's grid convention.
+
+ACOUSTIC_DX = 10.0
+
+ACOUSTIC_DY = 10.0
+
+ACOUSTIC_DZ = 10.0
+
+# Number of pressure-wavefield time samples.
+# The temporal second derivative requires at least 3.
+
+ACOUSTIC_TIME_STEPS = 128
+
+# Ricker-type source dominant frequency [Hz].
+ACOUSTIC_SOURCE_FREQUENCY = 25.0
+
+# Source amplitude in the synthetic solver's amplitude units.
+ACOUSTIC_SOURCE_AMPLITUDE = 1.0
+
+# CFL safety factor used by the acoustic solver, if supported.
+# This does not replace a solver-specific stability check.
+
+ACOUSTIC_CFL_SAFETY = 0.90
+
+# None means use the solver's configured/default snapshot.
+# Otherwise, a solver may use the specified time index
+# for optional snapshot-based diagnostics.
+
+ACOUSTIC_SNAPSHOT_INDEX = None
+
+
+# =========================================================
+# 24. COMPOSITE LOSS WEIGHTS
 # =========================================================
 
 """
-Global composite loss:
+Composite training objective:
 
     L_total =
-        λ_mae L_mae
-        +
-        λ_physics L_physics
-        +
-        λ_uncertainty L_uncertainty
-        +
-        λ_ssim L_ssim
+        lambda_mae         * L_mae
+        + lambda_physics   * L_acoustic
+        + lambda_uncertainty * L_uncertainty
+        + lambda_ssim      * L_ssim
+
+L_acoustic is exclusively the acoustic wave-equation loss.
 """
 
 LOSS_WEIGHTS = {
@@ -570,51 +427,33 @@ LOSS_WEIGHTS = {
 
 
 # =========================================================
-# 24. PHYSICS-LOSS COMPONENT WEIGHTS
+# 25. PHYSICS-LOSS COMPONENT WEIGHTS
 # =========================================================
 
 """
-Physics loss:
+The only configured physics component is:
 
-    L_physics =
-        λ_eikonal L_eikonal
-        +
-        λ_source L_source
-        +
-        λ_travel_time L_travel_time
+    L_physics = L_acoustic_wave_equation
 """
 
 PHYSICS_LOSS_WEIGHTS = {
-    "eikonal": 1.0,
-    "source": 1.0,
-    "travel_time": 1.0,
+    "acoustic_wave_equation": 1.0,
 }
 
 
 # =========================================================
-# 25. PHYSICAL SEISMIC SAMPLING
+# 26. GENERAL SPATIAL SAMPLING
 # =========================================================
 
-# Inline spacing [m].
+# Retained for other spatial operations that use these
+# project-wide parameters. The acoustic solver should use
+# ACOUSTIC_DX, ACOUSTIC_DY, and ACOUSTIC_DZ.
 
 DX = 1.0
 
-
-# Crossline spacing [m].
-
 DY = 1.0
 
-
-# Depth spacing [m].
-
 DZ = 1.0
-
-
-# =========================================================
-# 26. TRAVEL-TIME CONFIGURATION
-# =========================================================
-
-TRAVEL_TIME_SCALE = 0.1
 
 
 # =========================================================
@@ -626,13 +465,15 @@ Physical P-wave velocity:
 
     V [m/s]
 
-If velocity is normalized to [0,1]:
-
+For normalized velocity inputs:
     VELOCITY_NORMALIZED = True
 
-Otherwise:
-
+For physical velocity inputs:
     VELOCITY_NORMALIZED = False
+
+The acoustic equation requires physically meaningful
+velocity values, or a correctly implemented conversion
+from normalized values to physical velocity.
 """
 
 VELOCITY_NORMALIZED = False
@@ -651,8 +492,7 @@ SEISMIC_AMPLITUDE_MIN = -1.0
 SEISMIC_AMPLITUDE_MAX = 1.0
 
 SEISMIC_DATA_RANGE = (
-    SEISMIC_AMPLITUDE_MAX
-    - SEISMIC_AMPLITUDE_MIN
+    SEISMIC_AMPLITUDE_MAX - SEISMIC_AMPLITUDE_MIN
 )
 
 
@@ -697,14 +537,9 @@ USE_AMP = False
 """
 Available modes:
 
-    "cpu"
-        Force CPU.
-
-    "cuda"
-        Require CUDA.
-
-    "auto"
-        Use CUDA when available; otherwise CPU.
+    "cpu"  - force CPU
+    "cuda" - require CUDA
+    "auto" - use CUDA when available, otherwise CPU
 """
 
 DEVICE = "auto"
@@ -716,20 +551,17 @@ DEVICE = "auto"
 
 OUTPUT_ROOT = "outputs"
 
-
 CHECKPOINT_DIR = (
     f"{OUTPUT_ROOT}/"
     f"{EXPERIMENT_NAME}/"
     f"checkpoints"
 )
 
-
 FIGURE_DIR = (
     f"{OUTPUT_ROOT}/"
     f"{EXPERIMENT_NAME}/"
     f"figures"
 )
-
 
 REPORT_DIR = (
     f"{OUTPUT_ROOT}/"
@@ -746,26 +578,15 @@ SEED = 42
 
 
 # =========================================================
-# 35. CONFIGURATION VALIDATION
+# 35. CONFIGURATION VALIDATION HELPERS
 # =========================================================
 
-def _validate_positive_integer(
-    value,
-    name,
-):
-    """
-    Validate a positive integer configuration value.
-    """
+def _validate_positive_integer(value, name):
+    """Require a positive integer, excluding booleans."""
 
     if (
-        not isinstance(
-            value,
-            int,
-        )
-        or isinstance(
-            value,
-            bool,
-        )
+        not isinstance(value, int)
+        or isinstance(value, bool)
         or value < 1
     ):
         raise ValueError(
@@ -773,23 +594,12 @@ def _validate_positive_integer(
         )
 
 
-def _validate_nonnegative_number(
-    value,
-    name,
-):
-    """
-    Validate a non-negative numeric value.
-    """
+def _validate_nonnegative_number(value, name):
+    """Require a non-negative numeric value."""
 
     if (
-        not isinstance(
-            value,
-            (int, float),
-        )
-        or isinstance(
-            value,
-            bool,
-        )
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
         or value < 0
     ):
         raise ValueError(
@@ -797,163 +607,102 @@ def _validate_nonnegative_number(
         )
 
 
-def _validate_probability(
-    value,
-    name,
-):
-    """
-    Validate probability using the project-wide convention:
-
-        0.0 <= p < 1.0
-    """
+def _validate_positive_number(value, name):
+    """Require a strictly positive numeric value."""
 
     if (
-        not isinstance(
-            value,
-            (int, float),
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or value <= 0
+    ):
+        raise ValueError(
+            f"{name} must be a positive number."
         )
-        or isinstance(
-            value,
-            bool,
-        )
+
+
+def _validate_probability(value, name):
+    """Require 0 <= value < 1."""
+
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
     ):
         raise TypeError(
             f"{name} must be a real number."
         )
 
-    value = float(value)
-
-    if not (
-        0.0
-        <= value
-        < 1.0
-    ):
+    if not 0.0 <= value < 1.0:
         raise ValueError(
-            f"{name} must satisfy "
-            "0.0 <= value < 1.0."
+            f"{name} must satisfy 0.0 <= value < 1.0."
         )
 
 
-def _validate_spatial_size(
-    value,
-    name,
-):
-    """
-    Validate a spatial dimension tuple:
+def _validate_spatial_size(value, name):
+    """Validate (Depth, Crossline, Inline) dimensions."""
 
-        (Depth, Crossline, Inline)
-    """
-
-    if not isinstance(
-        value,
-        (tuple, list),
-    ):
+    if not isinstance(value, (tuple, list)):
         raise TypeError(
             f"{name} must be a tuple or list."
         )
 
     if len(value) != 3:
         raise ValueError(
-            f"{name} must contain exactly "
-            "three dimensions."
+            f"{name} must contain exactly three dimensions."
         )
 
     for dimension in value:
-
         if (
-            not isinstance(
-                dimension,
-                int,
-            )
-            or isinstance(
-                dimension,
-                bool,
-            )
+            not isinstance(dimension, int)
+            or isinstance(dimension, bool)
             or dimension <= 0
         ):
             raise ValueError(
-                f"All dimensions in {name} must "
-                "be positive integers."
+                f"All dimensions in {name} must be "
+                "positive integers."
             )
 
 
-def _validate_stride(
-    stride,
-    patch_size,
-    name,
-):
-    """
-    Validate patch extraction stride.
+def _validate_stride(stride, patch_size, name):
+    """Validate patch-extraction stride."""
 
-    The present project uses contiguous/non-overlapping
-    extraction, so stride values larger than the corresponding
-    patch dimensions are rejected.
-    """
+    _validate_spatial_size(stride, name)
 
-    _validate_spatial_size(
-        stride,
-        name,
-    )
-
-    for stride_value, patch_value in zip(
-        stride,
-        patch_size,
-    ):
-
+    for stride_value, patch_value in zip(stride, patch_size):
         if stride_value > patch_value:
-
             raise ValueError(
                 f"{name} cannot exceed the corresponding "
-                f"patch dimension. "
-                f"Received stride={stride_value}, "
+                f"patch dimension: stride={stride_value}, "
                 f"patch={patch_value}."
             )
 
 
+# =========================================================
+# 36. CONFIGURATION VALIDATION
+# =========================================================
+
 def validate_config():
-    """
-    Validate the complete global configuration.
+    """Validate dataset, training, acoustic physics, and outputs."""
 
-    This function should be executed before training,
-    evaluation, or controlled experiments.
-    """
+    # -----------------------------------------------------
+    # Dataset mode and experiment name
+    # -----------------------------------------------------
 
-    # =====================================================
-    # DATASET MODE
-    # =====================================================
-
-    if not isinstance(
-        DATASET_MODE,
-        str,
-    ):
-        raise TypeError(
-            "DATASET_MODE must be a string."
-        )
-
-    if DATASET_MODE not in {
-        "synthetic",
-        "f3",
-    }:
+    if DATASET_MODE not in {"synthetic", "f3"}:
         raise ValueError(
-            "DATASET_MODE must be either "
-            "'synthetic' or 'f3'."
+            "DATASET_MODE must be 'synthetic' or 'f3'."
         )
 
-    # =====================================================
-    # EXPERIMENT NAME
-    # =====================================================
-
-    if not isinstance(
-        EXPERIMENT_NAME,
-        str,
-    ) or not EXPERIMENT_NAME.strip():
+    if (
+        not isinstance(EXPERIMENT_NAME, str)
+        or not EXPERIMENT_NAME.strip()
+    ):
         raise ValueError(
             "EXPERIMENT_NAME must be a non-empty string."
         )
 
-    # =====================================================
-    # SYNTHETIC DATASET
-    # =====================================================
+    # -----------------------------------------------------
+    # Synthetic dataset
+    # -----------------------------------------------------
 
     _validate_positive_integer(
         SYNTHETIC_NUM_SAMPLES,
@@ -970,14 +719,11 @@ def validate_config():
         "SYNTHETIC_MISSING_PROBABILITY",
     )
 
-    # =====================================================
-    # F3 DATASET
-    # =====================================================
+    # -----------------------------------------------------
+    # F3 dataset
+    # -----------------------------------------------------
 
-    _validate_spatial_size(
-        F3_PATCH_SIZE,
-        "F3_PATCH_SIZE",
-    )
+    _validate_spatial_size(F3_PATCH_SIZE, "F3_PATCH_SIZE")
 
     _validate_stride(
         F3_STRIDE,
@@ -990,18 +736,14 @@ def validate_config():
         "F3_MISSING_PROBABILITY",
     )
 
-    if not isinstance(
-        F3_PATH,
-        str,
-    ) or not F3_PATH.strip():
-
+    if not isinstance(F3_PATH, str) or not F3_PATH.strip():
         raise ValueError(
             "F3_PATH must be a non-empty string."
         )
 
-    # =====================================================
-    # BASELINE CONFIGURATION
-    # =====================================================
+    # -----------------------------------------------------
+    # Baseline configuration
+    # -----------------------------------------------------
 
     _validate_positive_integer(
         BASELINE_NUM_SAMPLES,
@@ -1018,18 +760,12 @@ def validate_config():
         "BASELINE_MISSING_RATE",
     )
 
-    if not isinstance(
-        BASELINE_GEOLOGICAL_MODE,
-        str,
-    ):
+    if not isinstance(BASELINE_GEOLOGICAL_MODE, str):
         raise TypeError(
             "BASELINE_GEOLOGICAL_MODE must be a string."
         )
 
-    if not isinstance(
-        BASELINE_MASK_MODE,
-        str,
-    ):
+    if not isinstance(BASELINE_MASK_MODE, str):
         raise TypeError(
             "BASELINE_MASK_MODE must be a string."
         )
@@ -1039,61 +775,31 @@ def validate_config():
         "OBSERVED_PRESERVATION_TOLERANCE",
     )
 
-    # =====================================================
-    # TRAINING
-    # =====================================================
+    # -----------------------------------------------------
+    # Training and validation
+    # -----------------------------------------------------
 
-    _validate_positive_integer(
-        BATCH_SIZE,
-        "BATCH_SIZE",
-    )
+    _validate_positive_integer(BATCH_SIZE, "BATCH_SIZE")
 
-    _validate_positive_integer(
-        NUM_EPOCHS,
-        "NUM_EPOCHS",
-    )
+    _validate_positive_integer(NUM_EPOCHS, "NUM_EPOCHS")
 
-    if LEARNING_RATE <= 0:
+    _validate_positive_number(LEARNING_RATE, "LEARNING_RATE")
+
+    _validate_nonnegative_number(WEIGHT_DECAY, "WEIGHT_DECAY")
+
+    if not 0.0 < VALIDATION_SPLIT < 1.0:
         raise ValueError(
-            "LEARNING_RATE must be greater than zero."
+            "VALIDATION_SPLIT must be greater than 0 "
+            "and less than 1."
         )
 
-    _validate_nonnegative_number(
-        WEIGHT_DECAY,
-        "WEIGHT_DECAY",
-    )
+    _validate_positive_integer(SAVE_EVERY, "SAVE_EVERY")
 
-    # =====================================================
-    # VALIDATION
-    # =====================================================
+    _validate_positive_integer(PATIENCE, "PATIENCE")
 
-    if not (
-        0.0
-        < VALIDATION_SPLIT
-        < 1.0
-    ):
-        raise ValueError(
-            "VALIDATION_SPLIT must be greater than "
-            "0 and less than 1."
-        )
-
-    # =====================================================
-    # CHECKPOINTS / EARLY STOPPING
-    # =====================================================
-
-    _validate_positive_integer(
-        SAVE_EVERY,
-        "SAVE_EVERY",
-    )
-
-    _validate_positive_integer(
-        PATIENCE,
-        "PATIENCE",
-    )
-
-    # =====================================================
-    # UNCERTAINTY
-    # =====================================================
+    # -----------------------------------------------------
+    # Uncertainty
+    # -----------------------------------------------------
 
     _validate_positive_integer(
         MC_DROPOUT_SAMPLES,
@@ -1102,44 +808,38 @@ def validate_config():
 
     if LOG_VARIANCE_MAX <= LOG_VARIANCE_MIN:
         raise ValueError(
-            "LOG_VARIANCE_MAX must be greater than "
-            "LOG_VARIANCE_MIN."
+            "LOG_VARIANCE_MAX must exceed LOG_VARIANCE_MIN."
         )
 
     if UNCERTAINTY_EVALUATION_NUM_SAMPLES is not None:
-
         _validate_positive_integer(
             UNCERTAINTY_EVALUATION_NUM_SAMPLES,
             "UNCERTAINTY_EVALUATION_NUM_SAMPLES",
         )
 
     if UNCERTAINTY_CORRELATION_MAX_VOXELS is not None:
-
         _validate_positive_integer(
             UNCERTAINTY_CORRELATION_MAX_VOXELS,
             "UNCERTAINTY_CORRELATION_MAX_VOXELS",
         )
 
     if UNCERTAINTY_ERROR_CORRELATION_NUM_PATCHES is not None:
-
         _validate_positive_integer(
             UNCERTAINTY_ERROR_CORRELATION_NUM_PATCHES,
             "UNCERTAINTY_ERROR_CORRELATION_NUM_PATCHES",
         )
 
-    # =====================================================
-    # ROBUSTNESS LEVELS
-    # =====================================================
+    # -----------------------------------------------------
+    # Robustness configuration
+    # -----------------------------------------------------
 
     for level in NOISE_ROBUSTNESS_LEVELS:
-
         _validate_nonnegative_number(
             level,
             "NOISE_ROBUSTNESS_LEVELS",
         )
 
     for level in MISSING_DATA_ROBUSTNESS_LEVELS:
-
         _validate_probability(
             level,
             "MISSING_DATA_ROBUSTNESS_LEVELS",
@@ -1155,12 +855,11 @@ def validate_config():
         "MISSING_DATA_ROBUSTNESS_NUM_SAMPLES",
     )
 
-    # =====================================================
-    # GEOLOGICAL COMPLEXITY
-    # =====================================================
+    # -----------------------------------------------------
+    # Geological complexity
+    # -----------------------------------------------------
 
     if not GEOLOGICAL_COMPLEXITY_LEVELS:
-
         raise ValueError(
             "GEOLOGICAL_COMPLEXITY_LEVELS cannot be empty."
         )
@@ -1180,61 +879,38 @@ def validate_config():
         "GEOLOGICAL_COMPLEXITY_DATASET_SAMPLES",
     )
 
-    # =====================================================
-    # STATISTICS
-    # =====================================================
+    # -----------------------------------------------------
+    # Statistical settings
+    # -----------------------------------------------------
 
-    if not (
-        0.0
-        < STATISTICAL_ALPHA
-        < 1.0
-    ):
+    if not 0.0 < STATISTICAL_ALPHA < 1.0:
         raise ValueError(
             "STATISTICAL_ALPHA must be between 0 and 1."
         )
 
-    if not isinstance(
-        STATISTICAL_METRIC,
-        str,
-    ):
+    if not isinstance(STATISTICAL_METRIC, str):
         raise TypeError(
             "STATISTICAL_METRIC must be a string."
         )
 
-    if not isinstance(
-        STATISTICAL_TEST,
-        str,
-    ):
+    if not isinstance(STATISTICAL_TEST, str):
         raise TypeError(
             "STATISTICAL_TEST must be a string."
         )
 
-    # =====================================================
-    # CONTROLLED MATRIX
-    # =====================================================
+    # -----------------------------------------------------
+    # Controlled matrix
+    # -----------------------------------------------------
 
-    if (
-        CONTROLLED_MATRIX_CASE_LIMIT is not None
-        and (
-            not isinstance(
-                CONTROLLED_MATRIX_CASE_LIMIT,
-                int,
-            )
-            or isinstance(
-                CONTROLLED_MATRIX_CASE_LIMIT,
-                bool,
-            )
-            or CONTROLLED_MATRIX_CASE_LIMIT < 1
-        )
-    ):
-        raise ValueError(
-            "CONTROLLED_MATRIX_CASE_LIMIT must be "
-            "None or a positive integer."
+    if CONTROLLED_MATRIX_CASE_LIMIT is not None:
+        _validate_positive_integer(
+            CONTROLLED_MATRIX_CASE_LIMIT,
+            "CONTROLLED_MATRIX_CASE_LIMIT",
         )
 
-    # =====================================================
-    # CURVELET
-    # =====================================================
+    # -----------------------------------------------------
+    # Curvelet POCS
+    # -----------------------------------------------------
 
     _validate_positive_integer(
         CURVELET_NUM_SCALES,
@@ -1256,14 +932,10 @@ def validate_config():
         "CURVELET_THRESHOLD",
     )
 
-    if not (
-        0.0
-        < CURVELET_THRESHOLD_DECAY
-        <= 1.0
-    ):
+    if not 0.0 < CURVELET_THRESHOLD_DECAY <= 1.0:
         raise ValueError(
-            "CURVELET_THRESHOLD_DECAY must be "
-            "greater than 0 and at most 1."
+            "CURVELET_THRESHOLD_DECAY must be greater "
+            "than 0 and at most 1."
         )
 
     _validate_nonnegative_number(
@@ -1271,130 +943,166 @@ def validate_config():
         "CURVELET_TOLERANCE",
     )
 
-    # =====================================================
-    # PHYSICS
-    # =====================================================
-
-    if USE_SOURCE_LOSS:
-        raise ValueError(
-            "USE_SOURCE_LOSS=True is not supported by "
-            "the current dataset because valid source "
-            "coordinates are not available."
-        )
-
-    if USE_TRAVEL_TIME_LOSS:
-        raise ValueError(
-            "USE_TRAVEL_TIME_LOSS=True is not supported "
-            "because independent travel-time targets are "
-            "not currently available."
-        )
+    # -----------------------------------------------------
+    # Strict acoustic-physics configuration
+    # -----------------------------------------------------
 
     if not USE_PHYSICS_LOSS:
+        raise ValueError(
+            "This experiment requires USE_PHYSICS_LOSS=True."
+        )
 
-        if USE_EIKONAL_LOSS:
-            raise ValueError(
-                "USE_EIKONAL_LOSS cannot be True when "
-                "USE_PHYSICS_LOSS is False."
-            )
+    if not USE_ACOUSTIC_WAVE_EQUATION_LOSS:
+        raise ValueError(
+            "The acoustic wave-equation loss must be enabled."
+        )
 
-        if USE_SOURCE_LOSS:
-            raise ValueError(
-                "USE_SOURCE_LOSS cannot be True when "
-                "USE_PHYSICS_LOSS is False."
-            )
+    if PHYSICS_TYPE != "acoustic_wave_equation":
+        raise ValueError(
+            "PHYSICS_TYPE must be 'acoustic_wave_equation'."
+        )
 
-        if USE_TRAVEL_TIME_LOSS:
-            raise ValueError(
-                "USE_TRAVEL_TIME_LOSS cannot be True "
-                "when USE_PHYSICS_LOSS is False."
-            )
-
-    # =====================================================
-    # LOSS WEIGHTS
-    # =====================================================
-
-    for name, value in LOSS_WEIGHTS.items():
-
-        _validate_nonnegative_number(
-            value,
-            f"LOSS_WEIGHTS['{name}']",
+    if set(PHYSICS_LOSS_WEIGHTS) != {
+        "acoustic_wave_equation"
+    }:
+        raise ValueError(
+            "PHYSICS_LOSS_WEIGHTS must contain only "
+            "'acoustic_wave_equation'."
         )
 
     for name, value in PHYSICS_LOSS_WEIGHTS.items():
-
         _validate_nonnegative_number(
             value,
             f"PHYSICS_LOSS_WEIGHTS['{name}']",
         )
 
-    # =====================================================
-    # PHYSICAL SAMPLING
-    # =====================================================
-
-    if DX <= 0:
+    if PHYSICS_LOSS_WEIGHTS["acoustic_wave_equation"] <= 0:
         raise ValueError(
-            "DX must be greater than zero."
+            "The acoustic wave-equation weight must be positive."
         )
 
-    if DY <= 0:
+    if LOSS_WEIGHTS.get("physics", 0.0) <= 0:
         raise ValueError(
-            "DY must be greater than zero."
+            "LOSS_WEIGHTS['physics'] must be positive "
+            "for acoustic physics training."
         )
 
-    if DZ <= 0:
+    # -----------------------------------------------------
+    # Acoustic simulation parameters
+    # -----------------------------------------------------
+
+    _validate_positive_number(ACOUSTIC_DT, "ACOUSTIC_DT")
+
+    _validate_positive_number(ACOUSTIC_DX, "ACOUSTIC_DX")
+
+    _validate_positive_number(ACOUSTIC_DY, "ACOUSTIC_DY")
+
+    _validate_positive_number(ACOUSTIC_DZ, "ACOUSTIC_DZ")
+
+    _validate_positive_integer(
+        ACOUSTIC_TIME_STEPS,
+        "ACOUSTIC_TIME_STEPS",
+    )
+
+    if ACOUSTIC_TIME_STEPS < 3:
         raise ValueError(
-            "DZ must be greater than zero."
+            "ACOUSTIC_TIME_STEPS must be at least 3 "
+            "for the temporal second derivative."
         )
 
-    if TRAVEL_TIME_SCALE <= 0:
+    _validate_positive_number(
+        ACOUSTIC_SOURCE_FREQUENCY,
+        "ACOUSTIC_SOURCE_FREQUENCY",
+    )
+
+    _validate_nonnegative_number(
+        ACOUSTIC_SOURCE_AMPLITUDE,
+        "ACOUSTIC_SOURCE_AMPLITUDE",
+    )
+
+    if not 0.0 < ACOUSTIC_CFL_SAFETY <= 1.0:
         raise ValueError(
-            "TRAVEL_TIME_SCALE must be greater than zero."
+            "ACOUSTIC_CFL_SAFETY must be in (0, 1]."
         )
 
-    # =====================================================
-    # VELOCITY
-    # =====================================================
+    if ACOUSTIC_SNAPSHOT_INDEX is not None:
+        if (
+            not isinstance(ACOUSTIC_SNAPSHOT_INDEX, int)
+            or isinstance(ACOUSTIC_SNAPSHOT_INDEX, bool)
+            or not 0 <= ACOUSTIC_SNAPSHOT_INDEX
+            < ACOUSTIC_TIME_STEPS
+        ):
+            raise ValueError(
+                "ACOUSTIC_SNAPSHOT_INDEX must be None "
+                "or an index within the simulated time range."
+            )
 
-    if VELOCITY_MIN <= 0:
+    # -----------------------------------------------------
+    # Composite-loss weights
+    # -----------------------------------------------------
+
+    required_loss_weights = {
+        "mae",
+        "physics",
+        "uncertainty",
+        "ssim",
+    }
+
+    if not required_loss_weights.issubset(LOSS_WEIGHTS):
         raise ValueError(
-            "VELOCITY_MIN must be greater than zero."
+            "LOSS_WEIGHTS must include mae, physics, "
+            "uncertainty, and ssim."
         )
+
+    for name, value in LOSS_WEIGHTS.items():
+        _validate_nonnegative_number(
+            value,
+            f"LOSS_WEIGHTS['{name}']",
+        )
+
+    # -----------------------------------------------------
+    # General spatial sampling
+    # -----------------------------------------------------
+
+    _validate_positive_number(DX, "DX")
+    _validate_positive_number(DY, "DY")
+    _validate_positive_number(DZ, "DZ")
+
+    # -----------------------------------------------------
+    # Velocity
+    # -----------------------------------------------------
+
+    _validate_positive_number(VELOCITY_MIN, "VELOCITY_MIN")
+
+    _validate_positive_number(VELOCITY_MAX, "VELOCITY_MAX")
 
     if VELOCITY_MAX <= VELOCITY_MIN:
         raise ValueError(
-            "VELOCITY_MAX must be greater than "
-            "VELOCITY_MIN."
+            "VELOCITY_MAX must exceed VELOCITY_MIN."
         )
 
-    # =====================================================
-    # AMPLITUDE
-    # =====================================================
+    # -----------------------------------------------------
+    # Seismic amplitude
+    # -----------------------------------------------------
 
-    if (
-        SEISMIC_AMPLITUDE_MAX
-        <= SEISMIC_AMPLITUDE_MIN
-    ):
+    if SEISMIC_AMPLITUDE_MAX <= SEISMIC_AMPLITUDE_MIN:
         raise ValueError(
-            "SEISMIC_AMPLITUDE_MAX must be greater than "
+            "SEISMIC_AMPLITUDE_MAX must exceed "
             "SEISMIC_AMPLITUDE_MIN."
         )
 
     if SEISMIC_DATA_RANGE <= 0:
         raise ValueError(
-            "SEISMIC_DATA_RANGE must be greater than zero."
+            "SEISMIC_DATA_RANGE must be positive."
         )
 
-    # =====================================================
-    # MASK
-    # =====================================================
+    # -----------------------------------------------------
+    # Mask convention
+    # -----------------------------------------------------
 
-    if (
-        MASK_OBSERVED_VALUE
-        == MASK_MISSING_VALUE
-    ):
+    if MASK_OBSERVED_VALUE == MASK_MISSING_VALUE:
         raise ValueError(
-            "MASK_OBSERVED_VALUE and "
-            "MASK_MISSING_VALUE must be different."
+            "Observed and missing mask values must differ."
         )
 
     if (
@@ -1402,132 +1110,63 @@ def validate_config():
         or MASK_MISSING_VALUE != 0.0
     ):
         raise ValueError(
-            "The project-wide mask convention must remain: "
-            "1.0 = observed and 0.0 = missing."
+            "Mask convention must remain 1.0=observed "
+            "and 0.0=missing."
         )
 
-    # =====================================================
-    # DATALOADER
-    # =====================================================
+    # -----------------------------------------------------
+    # DataLoader
+    # -----------------------------------------------------
 
-    _validate_nonnegative_number(
-        NUM_WORKERS,
-        "NUM_WORKERS",
-    )
+    _validate_nonnegative_number(NUM_WORKERS, "NUM_WORKERS")
 
-    if not isinstance(
-        PIN_MEMORY,
-        bool,
-    ):
-        raise TypeError(
-            "PIN_MEMORY must be boolean."
-        )
+    if not isinstance(PIN_MEMORY, bool):
+        raise TypeError("PIN_MEMORY must be boolean.")
 
-    if not isinstance(
-        PERSISTENT_WORKERS,
-        bool,
-    ):
-        raise TypeError(
-            "PERSISTENT_WORKERS must be boolean."
-        )
+    if not isinstance(PERSISTENT_WORKERS, bool):
+        raise TypeError("PERSISTENT_WORKERS must be boolean.")
 
-    if (
-        PERSISTENT_WORKERS
-        and NUM_WORKERS == 0
-    ):
+    if PERSISTENT_WORKERS and NUM_WORKERS == 0:
         raise ValueError(
-            "PERSISTENT_WORKERS=True requires "
-            "NUM_WORKERS > 0."
+            "PERSISTENT_WORKERS=True requires NUM_WORKERS > 0."
         )
 
-    # =====================================================
-    # DEVICE
-    # =====================================================
+    # -----------------------------------------------------
+    # Device and mixed precision
+    # -----------------------------------------------------
 
-    if DEVICE not in {
-        "cpu",
-        "cuda",
-        "auto",
-    }:
+    if DEVICE not in {"cpu", "cuda", "auto"}:
         raise ValueError(
             "DEVICE must be 'cpu', 'cuda', or 'auto'."
         )
 
-    # =====================================================
-    # AMP
-    # =====================================================
+    if not isinstance(USE_AMP, bool):
+        raise TypeError("USE_AMP must be boolean.")
 
-    if not isinstance(
-        USE_AMP,
-        bool,
+    # -----------------------------------------------------
+    # Pipeline controls
+    # -----------------------------------------------------
+
+    for name, value in (
+        ("RUN_TRAINING", RUN_TRAINING),
+        ("RESUME_EVALUATION", RESUME_EVALUATION),
+        ("FORCE_RERUN_EVALUATION", FORCE_RERUN_EVALUATION),
+        ("USE_ATTENTION", USE_ATTENTION),
+        ("USE_RESIDUAL", USE_RESIDUAL),
+        ("USE_UNCERTAINTY", USE_UNCERTAINTY),
+        ("VELOCITY_NORMALIZED", VELOCITY_NORMALIZED),
     ):
-        raise TypeError(
-            "USE_AMP must be boolean."
-        )
+        if not isinstance(value, bool):
+            raise TypeError(f"{name} must be boolean.")
 
-    # IMPORTANT:
-    #
-    # DEVICE='auto' is allowed with AMP because the
-    # runtime may resolve automatically to CUDA.
-    #
-    # The Trainer/device utility is responsible for
-    # enabling AMP only when CUDA is actually active.
+    # -----------------------------------------------------
+    # Reproducibility and output
+    # -----------------------------------------------------
 
-    # =====================================================
-    # PIPELINE CONTROLS
-    # =====================================================
+    if not isinstance(SEED, int) or isinstance(SEED, bool):
+        raise TypeError("SEED must be an integer.")
 
-    if not isinstance(
-        RUN_TRAINING,
-        bool,
-    ):
-        raise TypeError(
-            "RUN_TRAINING must be boolean."
-        )
-
-    if not isinstance(
-        RESUME_EVALUATION,
-        bool,
-    ):
-        raise TypeError(
-            "RESUME_EVALUATION must be boolean."
-        )
-
-    if not isinstance(
-        FORCE_RERUN_EVALUATION,
-        bool,
-    ):
-        raise TypeError(
-            "FORCE_RERUN_EVALUATION must be boolean."
-        )
-
-    # =====================================================
-    # REPRODUCIBILITY
-    # =====================================================
-
-    if (
-        not isinstance(
-            SEED,
-            int,
-        )
-        or isinstance(
-            SEED,
-            bool,
-        )
-    ):
-        raise TypeError(
-            "SEED must be an integer."
-        )
-
-    # =====================================================
-    # OUTPUT DIRECTORIES
-    # =====================================================
-
-    if not isinstance(
-        OUTPUT_ROOT,
-        str,
-    ) or not OUTPUT_ROOT.strip():
-
+    if not isinstance(OUTPUT_ROOT, str) or not OUTPUT_ROOT.strip():
         raise ValueError(
             "OUTPUT_ROOT must be a non-empty string."
         )
@@ -1536,7 +1175,7 @@ def validate_config():
 
 
 # =========================================================
-# RUN CONFIGURATION VALIDATION
+# 37. RUN CONFIGURATION VALIDATION
 # =========================================================
 
 validate_config()

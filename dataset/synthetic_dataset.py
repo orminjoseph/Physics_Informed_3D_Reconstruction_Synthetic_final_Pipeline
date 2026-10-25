@@ -1,205 +1,66 @@
-"""
-=========================================================
-Synthetic 3D Seismic Dataset
-=========================================================
 
-Physics-Informed 3D Encoder–Decoder Framework
+"""
+====================================================================
+ACOUSTIC-WAVE SYNTHETIC SEISMIC DATASET
+====================================================================
+
+Project:
+Physics-Informed 3D Encoder-Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction
-in Complex Geological Settings
 
 Purpose
 -------
-Generates scientifically controlled synthetic 3D seismic
-reconstruction samples containing:
+1. Generate a geological model to define the synthetic model geometry.
+2. Generate a corresponding velocity model.
+3. Simulate acoustic pressure propagation using AcousticForwardSolver.
+4. Derive the 3D reconstruction target from the simulated pressure field.
+5. Generate a missing-data mask and corrupt the reconstruction target.
+6. Return the full pressure wavefield and source for the acoustic
+   wave-equation physics loss.
 
-    1. incomplete seismic input
-    2. complete seismic target
-    3. sampling mask
-    4. geologically conditioned velocity model
-    5. mask type
-    6. geological mode
+Dataset output
+--------------
+input_cube       : [1, D, H, W]
+target_cube      : [1, D, H, W]
+mask              : [1, D, H, W]
+velocity          : [1, D, H, W]
+source            : [1, T, D, H, W]
+mask_type         : string
+geological_mode   : string
 
-The dataset is designed for:
+The DataLoader adds the batch dimension.
 
-    - supervised seismic reconstruction
-    - physics-informed learning
-    - Eikonal-based physical constraints
-    - uncertainty-aware reconstruction
-    - geological-complexity experiments
-    - missing-data robustness experiments
-    - reproducible PhD-level numerical experiments
+IMPORTANT SCIENTIFIC NOTE
+-------------------------
+The target is a 3D pressure snapshot extracted from the simulated
+time-dependent acoustic pressure field. It is not a conventional
+recorded seismic survey cube.
 
-Tensor convention
------------------
-Individual sample:
+The acoustic physics loss uses the complete pressure wavefield,
+the velocity model, and the source term.
 
-    [C, D, H, W]
-
-DataLoader batch:
-
-    [B, C, D, H, W]
-
-where:
-
-    C = seismic channel
-    D = depth/time-sample dimension
-    H = crossline/spatial dimension
-    W = inline/spatial dimension
-
-Important
----------
-The velocity model is supplied to the physics-informed loss.
-It is NOT predicted by the neural network.
-
-The velocity model is conditioned on the same geological
-scenario used to generate the seismic target.
-
-Samples are generated lazily inside __getitem__.
-The complete dataset is therefore NOT stored in RAM.
-
-Reproducibility
----------------
-Every sample receives a deterministic seed derived from:
-
-    dataset_seed + sample_index * 100003
-
-Independent deterministic seed streams are used for:
-
-    - geological generation
-    - velocity generation
-    - mask generation
-
-Each geological sample receives a NEW GeologicalGenerator
-instance initialized with its deterministic geological seed.
-This prevents state carried by a persistent generator from
-changing the result when the same sample is requested more
-than once.
-
-Balanced training coverage
---------------------------
-When geological_mode="random", geological structures are
-NOT selected using uncontrolled random sampling.
-
-Instead, a deterministic balanced cycle is used:
-
-    horizontal
-    dipping
-    faulted
-    folded
-    complex
-    highly_complex
-    horizontal
-    dipping
-    ...
-
-Therefore, even a 10-sample smoke-test dataset contains
-all six geological structures.
-
-Likewise, when mask_mode="random", the five missing-data
-mechanisms are selected using a deterministic balanced cycle.
-
-This design scales naturally to larger datasets.
-
-Author: Ormin Joseph
-=========================================================
+This dataset is intended for the separate acoustic synthetic
+experiment. It does not modify the original Eikonal experiment.
+====================================================================
 """
-
-# =========================================================
-# STANDARD LIBRARY
-# =========================================================
-
-import random
-
-
-# =========================================================
-# NUMERICAL / DEEP LEARNING LIBRARIES
-# =========================================================
 
 import numpy as np
 import torch
-
 from torch.utils.data import Dataset
-
-
-# =========================================================
-# PROJECT MODULES
-# =========================================================
 
 from dataset.geological_generator import GeologicalGenerator
 from dataset.velocity_generator import VelocityGenerator
 from dataset.mask_generator import SeismicMaskGenerator
+from dataset.acoustic_forward_solver import AcousticForwardSolver
 
-
-# =========================================================
-# DATASET CLASS
-# =========================================================
 
 class SyntheticSeismicDataset(Dataset):
     """
-    Lazy synthetic 3D seismic dataset.
+    Synthetic dataset using acoustic-wave-equation simulations.
 
-    Each generated sample contains:
-
-        input_cube
-        target_cube
-        mask
-        velocity_model
-        mask_type
-        geological_mode
-
-    Tensor shape:
-
-        [C, D, H, W]
-
-    where C is normally 1 for the present framework.
-
-    The dataset does not retain complete seismic samples in
-    memory. Samples are generated only when requested.
-
-    Important design principle
-    --------------------------
-    When geological_mode="random", the word "random" means
-    deterministic balanced assignment rather than uncontrolled
-    random sampling.
-
-    This guarantees that small smoke-test datasets still
-    contain all geological structures.
+    Each sample is generated lazily and deterministically from its
+    dataset index, allowing reproducible training and validation.
     """
-
-    # =====================================================
-    # VALID GEOLOGICAL MODES
-    # =====================================================
-
-    VALID_GEOLOGICAL_MODES = (
-        "horizontal",
-        "dipping",
-        "faulted",
-        "folded",
-        "complex",
-        "highly_complex",
-    )
-
-    # =====================================================
-    # VALID MISSING-DATA MODES
-    # =====================================================
-
-    VALID_MASK_TYPES = (
-        "random_voxels",
-        "missing_traces",
-        "missing_inlines",
-        "missing_crosslines",
-        "missing_blocks",
-    )
-
-    # =====================================================
-    # SAMPLE SEED MULTIPLIER
-    # =====================================================
-
-    SAMPLE_SEED_MULTIPLIER = 100003
-
-    # =====================================================
-    # INITIALIZATION
-    # =====================================================
 
     def __init__(
         self,
@@ -209,1305 +70,424 @@ class SyntheticSeismicDataset(Dataset):
         geological_mode="random",
         mask_mode="random",
         seed=42,
+        acoustic_dt=0.0005,
+        acoustic_dx=10.0,
+        acoustic_dy=10.0,
+        acoustic_dz=10.0,
+        acoustic_time_steps=128,
+        source_frequency=25.0,
+        source_amplitude=1.0,
+        snapshot_index=None,
     ):
         """
         Parameters
         ----------
         num_samples : int
-            Number of synthetic seismic samples.
+            Number of synthetic samples.
 
         cube_size : tuple
-            3D seismic volume dimensions:
-
-                (depth, height, width)
+            Spatial dimensions (D, H, W).
 
         missing_probability : float
-            Fraction of seismic observations removed
-            by the sampling mask.
+            Fraction of target samples that are masked as missing.
 
         geological_mode : str
-            Geological scenario.
-
-            Options:
-
-                horizontal
-                dipping
-                faulted
-                folded
-                complex
-                highly_complex
-                random
-
-            When "random" is selected, the six geological
-            structures are assigned using a deterministic
-            balanced cycle.
+            Geological generator mode.
 
         mask_mode : str
-            Missing-data mechanism.
-
-            Options:
-
-                random_voxels
-                missing_traces
-                missing_inlines
-                missing_crosslines
-                missing_blocks
-                random
-
-            When "random" is selected, the five mechanisms
-            are assigned using a deterministic balanced cycle.
+            Mask generator mode.
 
         seed : int
-            Base seed controlling reproducibility.
-        """
+            Base random seed.
 
-        # -------------------------------------------------
-        # Initialize Dataset parent class
-        # -------------------------------------------------
+        acoustic_dt : float
+            Acoustic simulation time step in seconds.
+
+        acoustic_dx, acoustic_dy, acoustic_dz : float
+            Spatial grid spacing in metres.
+
+        acoustic_time_steps : int
+            Number of time steps in the acoustic simulation.
+
+        source_frequency : float
+            Dominant source frequency in Hz.
+
+        source_amplitude : float
+            Amplitude of the prescribed source.
+
+        snapshot_index : int or None
+            Optional time index used to extract the target snapshot.
+            If None, the time step with the greatest spatial pressure
+            energy is selected.
+        """
 
         super().__init__()
 
-        # =================================================
-        # VALIDATE BASIC TYPES BEFORE CONVERSION
-        # =================================================
+        if num_samples < 1:
+            raise ValueError("num_samples must be at least 1.")
 
-        if not isinstance(num_samples, int):
-            raise TypeError(
-                "num_samples must be an integer."
-            )
-
-        if not isinstance(seed, int):
-            raise TypeError(
-                "seed must be an integer."
-            )
-
-        if not isinstance(cube_size, (tuple, list)):
-            raise TypeError(
-                "cube_size must be a tuple or list "
-                "containing (depth, height, width)."
-            )
-
-        if len(cube_size) != 3:
+        if len(cube_size) != 3 or any(int(n) < 3 for n in cube_size):
             raise ValueError(
-                "cube_size must contain exactly "
-                "(depth, height, width)."
+                "cube_size must contain three spatial dimensions, "
+                "each at least 3."
             )
 
-        # =================================================
-        # STORE CONFIGURATION
-        # =================================================
-
-        self.num_samples = num_samples
-
-        self.cube_size = tuple(
-            int(dimension)
-            for dimension in cube_size
-        )
-
-        self.missing_probability = float(
-            missing_probability
-        )
-
-        self.geological_mode = str(
-            geological_mode
-        ).lower()
-
-        self.mask_mode = str(
-            mask_mode
-        ).lower()
-
-        self.seed = seed
-
-        # =================================================
-        # EXPECTED TENSOR SHAPE
-        # =================================================
-
-        self.expected_shape = (
-            1,
-            *self.cube_size,
-        )
-
-        # =================================================
-        # VALIDATE CONFIGURATION
-        # =================================================
-
-        self._validate_configuration()
-
-        # =================================================
-        # LIGHTWEIGHT METADATA
-        # =================================================
-        #
-        # IMPORTANT:
-        #
-        # No persistent GeologicalGenerator is created here.
-        #
-        # A persistent generator may maintain internal random
-        # state. If the same dataset sample is requested twice,
-        # that state could cause the target to change.
-        #
-        # Instead, a fresh geological generator is created
-        # inside _generate_sample() using the deterministic
-        # geological seed.
-        # =================================================
-
-        self.mask_types = [
-            None
-            for _ in range(self.num_samples)
-        ]
-
-        self.geological_modes = [
-            None
-            for _ in range(self.num_samples)
-        ]
-
-        # =================================================
-        # PRECOMPUTE DETERMINISTIC SCHEDULE
-        # =================================================
-        #
-        # This is intentionally lightweight.
-        #
-        # It contains only the geological and mask labels
-        # assigned to each sample index.
-        #
-        # It does NOT generate seismic data.
-        # =================================================
-
-        self._geological_schedule = [
-            self._scheduled_geological_mode(index)
-            for index in range(self.num_samples)
-        ]
-
-        self._mask_schedule = [
-            self._scheduled_mask_type(index)
-            for index in range(self.num_samples)
-        ]
-
-        # -------------------------------------------------
-        # Populate metadata immediately.
-        # -------------------------------------------------
-
-        self.geological_modes = list(
-            self._geological_schedule
-        )
-
-        self.mask_types = list(
-            self._mask_schedule
-        )
-
-        # =================================================
-        # DATASET INFORMATION
-        # =================================================
-
-        print()
-        print("=" * 70)
-        print("PHYSICS-INFORMED SYNTHETIC 3D SEISMIC DATASET")
-        print("=" * 70)
-
-        print(
-            f"Number of Samples    : {self.num_samples}"
-        )
-
-        print(
-            f"Cube Size            : {self.cube_size}"
-        )
-
-        print(
-            f"Missing Probability  : "
-            f"{self.missing_probability:.2f}"
-        )
-
-        print(
-            f"Geological Mode      : "
-            f"{self.geological_mode}"
-        )
-
-        print(
-            f"Mask Mode            : "
-            f"{self.mask_mode}"
-        )
-
-        print(
-            f"Random Seed          : "
-            f"{self.seed}"
-        )
-
-        print(
-            "Generation Strategy  : "
-            "On-demand / lazy"
-        )
-
-        print(
-            "Sampling Strategy    : "
-            "Deterministic balanced scheduling"
-        )
-
-        print(
-            "Velocity Coupling    : "
-            "Geological-mode conditioned"
-        )
-
-        # -------------------------------------------------
-        # Print geology coverage.
-        # -------------------------------------------------
-
-        if self.geological_mode == "random":
-
-            counts = self.get_geological_coverage()
-
-            print()
-            print("Geological Coverage")
-            print("-" * 70)
-
-            for mode in self.VALID_GEOLOGICAL_MODES:
-
-                print(
-                    f"{mode:<18}: {counts[mode]}"
-                )
-
-        # -------------------------------------------------
-        # Print mask coverage.
-        # -------------------------------------------------
-
-        if self.mask_mode == "random":
-
-            counts = self.get_mask_coverage()
-
-            print()
-            print("Mask-Mechanism Coverage")
-            print("-" * 70)
-
-            for mask_type in self.VALID_MASK_TYPES:
-
-                print(
-                    f"{mask_type:<22}: {counts[mask_type]}"
-                )
-
-        print("=" * 70)
-        print()
-
-    # =====================================================
-    # CONFIGURATION VALIDATION
-    # =====================================================
-
-    def _validate_configuration(self):
-        """
-        Validate all dataset configuration parameters.
-        """
-
-        # -------------------------------------------------
-        # Number of samples
-        # -------------------------------------------------
-
-        if self.num_samples <= 0:
-
+        if not 0.0 <= missing_probability <= 1.0:
             raise ValueError(
-                "num_samples must be greater than zero."
+                "missing_probability must be between 0 and 1."
             )
 
-        # -------------------------------------------------
-        # Cube dimensions
-        # -------------------------------------------------
+        self.num_samples = int(num_samples)
+        self.cube_size = tuple(int(n) for n in cube_size)
+        self.missing_probability = float(missing_probability)
+        self.geological_mode = geological_mode
+        self.mask_mode = mask_mode
+        self.seed = int(seed)
+        self.snapshot_index = snapshot_index
 
-        if len(self.cube_size) != 3:
+        # ----------------------------------------------------------
+        # Existing generators are retained.
+        # ----------------------------------------------------------
+        self.geological_generator = GeologicalGenerator()
+        self.velocity_generator = VelocityGenerator()
 
-            raise ValueError(
-                "cube_size must contain exactly "
-                "(depth, height, width)."
-            )
-
-        # -------------------------------------------------
-        # Positive dimensions
-        # -------------------------------------------------
-
-        if any(
-            dimension <= 0
-            for dimension in self.cube_size
-        ):
-
-            raise ValueError(
-                "All cube dimensions must be positive."
-            )
-
-        # -------------------------------------------------
-        # Missing-data probability
-        # -------------------------------------------------
-
-        if not (
-            0.0
-            <= self.missing_probability
-            < 1.0
-        ):
-
-            raise ValueError(
-                "missing_probability must be between "
-                "0.0 and less than 1.0."
-            )
-
-        # -------------------------------------------------
-        # Geological mode
-        # -------------------------------------------------
-
-        valid_geological_modes = (
-            self.VALID_GEOLOGICAL_MODES
-            + ("random",)
+        self.mask_generator = SeismicMaskGenerator(
+            cube_size=self.cube_size,
+            missing_probability=self.missing_probability,
         )
 
-        if self.geological_mode not in valid_geological_modes:
-
-            raise ValueError(
-                "Unsupported geological_mode: "
-                f"{self.geological_mode}. "
-                "Supported modes are: "
-                f"{valid_geological_modes}"
-            )
-
-        # -------------------------------------------------
-        # Mask mode
-        # -------------------------------------------------
-
-        valid_mask_modes = (
-            self.VALID_MASK_TYPES
-            + ("random",)
+        # ----------------------------------------------------------
+        # Acoustic forward solver.
+        #
+        # The solver generates pressure and source arrays from the
+        # velocity model. The pressure wavefield is used by the
+        # acoustic-wave-equation loss during training.
+        # ----------------------------------------------------------
+        self.acoustic_solver = AcousticForwardSolver(
+            dt=acoustic_dt,
+            dx=acoustic_dx,
+            dy=acoustic_dy,
+            dz=acoustic_dz,
+            n_time_steps=acoustic_time_steps,
+            source_frequency=source_frequency,
+            source_amplitude=source_amplitude,
         )
 
-        if self.mask_mode not in valid_mask_modes:
-
-            raise ValueError(
-                "Unsupported mask_mode: "
-                f"{self.mask_mode}. "
-                "Supported modes are: "
-                f"{valid_mask_modes}"
-            )
-
-    # =====================================================
-    # SAMPLE SEED
-    # =====================================================
-
-    def _get_sample_seed(self, idx):
-        """
-        Generate a deterministic seed for a sample.
-
-        The seed depends only on:
-
-            dataset seed
-            sample index
-        """
-
-        return (
-            self.seed
-            + int(idx) * self.SAMPLE_SEED_MULTIPLIER
-        )
-
-    # =====================================================
-    # SET SAMPLE RANDOM SEEDS
-    # =====================================================
-
-    def _set_sample_seed(self, idx):
-        """
-        Establish deterministic global random states.
-
-        These seeds are retained for compatibility with
-        components that may use global random states.
-        """
-
-        sample_seed = self._get_sample_seed(idx)
-
-        random.seed(
-            sample_seed
-        )
-
-        np.random.seed(
-            sample_seed % (2**32 - 1)
-        )
-
-        torch.manual_seed(
-            sample_seed
-        )
-
-        return sample_seed
-
-    # =====================================================
-    # DETERMINISTIC GEOLOGICAL SCHEDULER
-    # =====================================================
-
-    def _scheduled_geological_mode(self, idx):
-        """
-        Return the deterministic geological mode assigned
-        to a sample index.
-
-        If geological_mode is explicitly specified, that
-        geological mode is returned for every sample.
-
-        If geological_mode="random", the six geological
-        structures are cycled deterministically.
-        """
-
-        if self.geological_mode != "random":
-
-            return self.geological_mode
-
-        return self.VALID_GEOLOGICAL_MODES[
-            int(idx)
-            % len(self.VALID_GEOLOGICAL_MODES)
-        ]
-
-    # =====================================================
-    # DETERMINISTIC MASK SCHEDULER
-    # =====================================================
-
-    def _scheduled_mask_type(self, idx):
-        """
-        Return the deterministic missing-data mechanism
-        assigned to a sample index.
-
-        If mask_mode is explicitly specified, that mechanism
-        is returned for every sample.
-
-        If mask_mode="random", the five mechanisms are
-        cycled deterministically.
-        """
-
-        if self.mask_mode != "random":
-
-            return self.mask_mode
-
-        return self.VALID_MASK_TYPES[
-            int(idx)
-            % len(self.VALID_MASK_TYPES)
-        ]
-
-    # =====================================================
-    # GET SAMPLE METADATA
-    # =====================================================
-
-    def get_sample_metadata(self, idx):
-        """
-        Return deterministic metadata for a sample without
-        generating the seismic cube.
-        """
-
-        idx = int(idx)
-
-        # -------------------------------------------------
-        # Support negative indexing.
-        # -------------------------------------------------
-
-        if idx < 0:
-
-            idx += self.num_samples
-
-        # -------------------------------------------------
-        # Validate index.
-        # -------------------------------------------------
-
-        if idx < 0 or idx >= self.num_samples:
-
-            raise IndexError(
-                f"Dataset index {idx} is out of range "
-                f"for dataset of size {self.num_samples}."
-            )
-
-        # -------------------------------------------------
-        # Return lightweight metadata.
-        # -------------------------------------------------
-
-        return {
-            "index": idx,
-            "sample_seed": self._get_sample_seed(idx),
-            "geological_mode": (
-                self._geological_schedule[idx]
-            ),
-            "mask_type": (
-                self._mask_schedule[idx]
-            ),
-            "missing_probability": (
-                self.missing_probability
-            ),
-        }
-
-    # =====================================================
-    # GEOLOGICAL COVERAGE
-    # =====================================================
-
-    def get_geological_coverage(self):
-        """
-        Return the number of samples assigned to each
-        geological structure.
-
-        No seismic data are generated.
-        """
-
-        coverage = {
-            mode: 0
-            for mode in self.VALID_GEOLOGICAL_MODES
-        }
-
-        for mode in self._geological_schedule:
-
-            coverage[mode] += 1
-
-        return coverage
-
-    # =====================================================
-    # MASK COVERAGE
-    # =====================================================
-
-    def get_mask_coverage(self):
-        """
-        Return the number of samples assigned to each
-        missing-data mechanism.
-
-        No seismic data are generated.
-        """
-
-        coverage = {
-            mask_type: 0
-            for mask_type in self.VALID_MASK_TYPES
-        }
-
-        for mask_type in self._mask_schedule:
-
-            coverage[mask_type] += 1
-
-        return coverage
-
-    # =====================================================
-    # SET COMPONENT RANDOM STATES
-    # =====================================================
+    def __len__(self):
+        return self.num_samples
 
     @staticmethod
-    def _set_component_seed(seed):
-        """
-        Set deterministic Python, NumPy and PyTorch random
-        states for a particular generation component.
-        """
-
-        random.seed(
-            seed
-        )
-
-        np.random.seed(
-            seed % (2**32 - 1)
-        )
-
-        torch.manual_seed(
-            seed
-        )
-
-    # =====================================================
-    # CONVERT DATA TO FLOAT32 TENSOR
-    # =====================================================
-
-    @staticmethod
-    def _to_float_tensor(data):
-        """
-        Convert input data to a CPU float32 tensor.
-
-        GPU transfer is intentionally NOT performed here.
-
-        The DataLoader/training pipeline is responsible for
-        transferring batches to the selected device.
-        """
-
-        if isinstance(
-            data,
-            torch.Tensor,
-        ):
-
-            return data.to(
-                dtype=torch.float32,
-                device="cpu",
-            )
+    def _to_float_tensor(array):
+        """Convert a NumPy array or tensor to float32."""
+        if isinstance(array, torch.Tensor):
+            return array.detach().to(dtype=torch.float32)
 
         return torch.as_tensor(
-            data,
+            np.asarray(array),
             dtype=torch.float32,
-            device="cpu",
         )
 
-    # =====================================================
-    # GENERAL TENSOR VALIDATION
-    # =====================================================
-
-    def _validate_tensor(
-        self,
-        tensor,
-        name,
-    ):
+    def _prepare_spatial_cube(self, array, name):
         """
-        Validate tensor type, shape, and numerical validity.
+        Convert a spatial array into [1, D, H, W].
+
+        This function does not silently resize data. A shape mismatch
+        is reported because resizing a velocity or pressure model
+        without a defined interpolation method can alter its physics.
         """
+        tensor = self._to_float_tensor(array)
 
-        if not isinstance(
-            tensor,
-            torch.Tensor,
-        ):
+        # Accept a spatial array [D,H,W].
+        if tensor.ndim == 3:
+            tensor = tensor.unsqueeze(0)
 
-            raise RuntimeError(
-                f"{name} must be a PyTorch tensor."
+        # Accept [1,D,H,W].
+        if tensor.ndim != 4 or tensor.shape[0] != 1:
+            raise ValueError(
+                f"{name} must have shape [D,H,W] or [1,D,H,W]; "
+                f"received {tuple(tensor.shape)}."
             )
 
-        if tuple(tensor.shape) != self.expected_shape:
+        expected = (1, *self.cube_size)
 
-            raise RuntimeError(
-                f"{name} has an unexpected shape.\n"
-                f"Expected: {self.expected_shape}\n"
-                f"Received: {tuple(tensor.shape)}"
+        if tuple(tensor.shape) != expected:
+            raise ValueError(
+                f"{name} has shape {tuple(tensor.shape)}, "
+                f"but expected {expected}. Check the generator's "
+                "cube dimensions and acoustic solver grid."
             )
 
-        if not torch.isfinite(
-            tensor
-        ).all():
+        if not torch.isfinite(tensor).all():
+            raise ValueError(f"{name} contains NaN or infinite values.")
 
-            raise RuntimeError(
-                f"{name} contains NaN or Inf values."
+        return tensor.contiguous()
+
+    @staticmethod
+    def _prepare_wavefield(array, name):
+        """
+        Convert pressure/source to [1, T, D, H, W].
+
+        The DataLoader will add the batch dimension, giving
+        [B, 1, T, D, H, W] for the trainer.
+        """
+        tensor = SyntheticSeismicDataset._to_float_tensor(array)
+
+        if tensor.ndim == 4:
+            # Accept [T,D,H,W].
+            tensor = tensor.unsqueeze(0)
+
+        if tensor.ndim != 5 or tensor.shape[0] != 1:
+            raise ValueError(
+                f"{name} must have shape [T,D,H,W] or [1,T,D,H,W]; "
+                f"received {tuple(tensor.shape)}."
             )
 
-    # =====================================================
-    # VELOCITY VALIDATION
-    # =====================================================
+        if not torch.isfinite(tensor).all():
+            raise ValueError(f"{name} contains NaN or infinite values.")
 
-    def _validate_velocity(
-        self,
-        velocity,
-    ):
+        return tensor.contiguous()
+
+    def _generate_mask(self, generator):
+        """Generate and validate a binary observation mask."""
+        mask_result = generator.generate(mask_type=self.mask_mode)
+
+        # Support generators that return either a mask alone or
+        # (mask, mask_type).
+        if isinstance(mask_result, tuple):
+            mask_array = mask_result[0]
+            actual_mask_type = (
+                mask_result[1]
+                if len(mask_result) > 1
+                else self.mask_mode
+            )
+        else:
+            mask_array = mask_result
+            actual_mask_type = self.mask_mode
+
+        mask = self._prepare_spatial_cube(mask_array, "mask")
+
+        # A mask must contain only observed (1) or missing (0) values.
+        mask = (mask > 0.5).to(torch.float32)
+
+        return mask, str(actual_mask_type)
+
+    def _select_pressure_snapshot(self, pressure_wavefield):
         """
-        Validate the generated velocity model.
+        Extract a spatial pressure snapshot for reconstruction.
 
-        Requirements:
+        Input:
+            [1, T, D, H, W]
 
-            correct tensor shape
-            finite values
-            strictly positive velocity
+        Output:
+            [1, D, H, W]
+
+        If snapshot_index is not supplied, choose the time sample
+        with the largest spatial mean-square pressure. This avoids
+        selecting a time step solely because it is the midpoint.
         """
+        number_of_steps = pressure_wavefield.shape[1]
 
-        self._validate_tensor(
-            velocity,
-            "Generated velocity model",
-        )
+        if self.snapshot_index is not None:
+            index = int(self.snapshot_index)
 
-        if torch.any(
-            velocity <= 0
-        ):
+            if not 0 <= index < number_of_steps:
+                raise ValueError(
+                    f"snapshot_index={index} is outside the valid "
+                    f"range 0 to {number_of_steps - 1}."
+                )
+        else:
+            # Calculate one energy value per time step.
+            energy = pressure_wavefield[0].square().mean(
+                dim=(1, 2, 3)
+            )
+            index = int(torch.argmax(energy).item())
 
+        # Select one simulated spatial pressure field.
+        target_cube = pressure_wavefield[:, index, :, :, :]
+
+        if target_cube.ndim != 4:
             raise RuntimeError(
-                "Velocity model must contain "
-                "strictly positive velocities."
+                "Pressure snapshot must have shape [1,D,H,W]."
             )
 
-    # =====================================================
-    # MASK VALIDATION
-    # =====================================================
+        return target_cube.contiguous()
 
-    def _validate_mask(
-        self,
-        mask,
-    ):
+    def _generate_sample(self, idx):
         """
-        Validate the seismic sampling mask.
+        Generate one deterministic acoustic synthetic sample.
         """
 
-        self._validate_tensor(
-            mask,
-            "Generated sampling mask",
-        )
+        # ----------------------------------------------------------
+        # 1. Set up reproducible random streams for this sample.
+        # ----------------------------------------------------------
+        sample_seed = self.seed + int(idx)
 
-        unique_values = torch.unique(
-            mask
-        )
+        np_rng = np.random.default_rng(sample_seed)
 
-        if not torch.all(
-            (unique_values == 0.0)
-            |
-            (unique_values == 1.0)
-        ):
+        # Seed PyTorch operations used by the generators.
+        torch_generator = torch.Generator()
+        torch_generator.manual_seed(sample_seed)
 
-            raise RuntimeError(
-                "Sampling mask must contain "
-                "only 0.0 and 1.0 values."
-            )
-
-    # =====================================================
-    # GENERATE ONE SAMPLE
-    # =====================================================
-
-    def _generate_sample(
-        self,
-        idx,
-    ):
-        """
-        Generate one complete synthetic training sample.
-
-        Generation sequence
-        -------------------
-        1. establish deterministic sample seed
-        2. create independent component seeds
-        3. obtain scheduled geological scenario
-        4. create sample-specific geological generator
-        5. generate complete seismic target
-        6. generate corresponding velocity model
-        7. obtain scheduled missing-data mechanism
-        8. generate sampling mask
-        9. simulate incomplete acquisition
-        10. validate all outputs
-        11. return sample and metadata
-
-        Returns
-        -------
-        tuple
-
-            input_cube
-            target_cube
-            mask
-            velocity_model
-            mask_type
-            geological_mode
-        """
-
-        # =================================================
-        # STEP 1: SAMPLE SEED
-        # =================================================
-
-        sample_seed = self._set_sample_seed(
-            idx
-        )
-
-        # =================================================
-        # STEP 2: INDEPENDENT SEED STREAMS
-        # =================================================
-
-        geological_seed = (
-            sample_seed + 1
-        )
-
-        velocity_seed = (
-            sample_seed + 2
-        )
-
-        mask_seed = (
-            sample_seed + 3
-        )
-
-        # =================================================
-        # STEP 3: GEOLOGICAL SCENARIO
-        # =================================================
-
-        geological_mode = (
-            self._geological_schedule[idx]
-        )
-
-        # =================================================
-        # STEP 4: COMPLETE SEISMIC TARGET
-        # =================================================
+        # ----------------------------------------------------------
+        # 2. Generate the geological model.
         #
-        # CRITICAL REPRODUCIBILITY CORRECTION
-        #
-        # A NEW GeologicalGenerator is created for every
-        # sample using the deterministic geological seed.
-        #
-        # We intentionally do NOT keep one generator in
-        # self.generator.
-        #
-        # This prevents internal generator state from
-        # advancing between repeated calls to the same
-        # dataset index.
-        # =================================================
+        # The geology generator supplies the geological mode/model
+        # context. Its output is NOT used as the reconstruction
+        # target in this acoustic experiment.
+        # ----------------------------------------------------------
+        modes = [
+            "horizontal",
+            "dipping",
+            "faulted",
+            "folded",
+            "complex",
+            "highly_complex",
+        ]
 
-        geological_generator = GeologicalGenerator(
-            cube_size=self.cube_size,
-            seed=geological_seed,
-        )
+        if self.geological_mode == "random":
+            geological_mode = modes[idx % len(modes)]
+        else:
+            geological_mode = self.geological_mode
 
-        target = geological_generator.generate(
+        geological_model = self.geological_generator.generate(
             mode=geological_mode
         )
 
-        target = self._to_float_tensor(
-            target
+        geological_model = self._prepare_spatial_cube(
+            geological_model,
+            "geological_model",
         )
 
-        self._validate_tensor(
-            target,
-            "Generated seismic target",
+        # ----------------------------------------------------------
+        # 3. Generate the velocity model.
+        #
+        # The velocity model is supplied to the acoustic solver;
+        # velocity is not invented inside the physics loss.
+        # ----------------------------------------------------------
+        velocity = self.velocity_generator.generate()
+        velocity = self._prepare_spatial_cube(
+            velocity,
+            "velocity",
         )
 
-        # =================================================
-        # STEP 5: GEOLOGICALLY CONDITIONED VELOCITY MODEL
-        # =================================================
-
-        velocity_generator = VelocityGenerator(
-            cube_size=self.cube_size,
-            seed=velocity_seed,
-        )
-
-        velocity = (
-            velocity_generator.generate(
-                mode=geological_mode
+        if torch.any(velocity <= 0):
+            raise ValueError(
+                "Acoustic velocity must be strictly positive."
             )
+
+        # ----------------------------------------------------------
+        # 4. Run the acoustic forward simulation.
+        #
+        # Expected solver API:
+        #     pressure, source = solver.simulate(velocity_model)
+        #
+        # Expected returned shapes:
+        #     pressure: [1,T,D,H,W]
+        #     source:   [1,T,D,H,W]
+        #
+        # The velocity is converted to NumPy because the forward
+        # solver uses NumPy finite-difference calculations.
+        # ----------------------------------------------------------
+        velocity_np = velocity[0].cpu().numpy()
+
+        pressure_result, source_result = self.acoustic_solver.simulate(
+            velocity=velocity_np
         )
 
-        velocity = self._to_float_tensor(
-            velocity
+        pressure_wavefield = self._prepare_wavefield(
+            pressure_result,
+            "pressure_wavefield",
         )
 
-        self._validate_velocity(
-            velocity
+        source = self._prepare_wavefield(
+            source_result,
+            "source",
         )
 
-        # =================================================
-        # STEP 6: MISSING-DATA MECHANISM
-        # =================================================
+        # Verify the solver used the same spatial grid.
+        expected_spatial_shape = self.cube_size
+        actual_pressure_shape = tuple(pressure_wavefield.shape[2:])
+        actual_source_shape = tuple(source.shape[2:])
 
-        mask_type = (
-            self._mask_schedule[idx]
-        )
-
-        # =================================================
-        # STEP 7: GENERATE SAMPLING MASK
-        # =================================================
-
-        self._set_component_seed(
-            mask_seed
-        )
-
-        mask_generator = SeismicMaskGenerator(
-            cube_size=self.cube_size,
-            missing_probability=self.missing_probability,
-            seed=mask_seed,
-        )
-
-        mask = (
-            mask_generator.generate(
-                mask_type=mask_type
+        if actual_pressure_shape != expected_spatial_shape:
+            raise ValueError(
+                "Acoustic pressure spatial dimensions do not match "
+                f"cube_size: {actual_pressure_shape} versus "
+                f"{expected_spatial_shape}."
             )
+
+        if actual_source_shape != expected_spatial_shape:
+            raise ValueError(
+                "Acoustic source spatial dimensions do not match "
+                f"cube_size: {actual_source_shape} versus "
+                f"{expected_spatial_shape}."
+            )
+
+        if pressure_wavefield.shape[1] != source.shape[1]:
+            raise ValueError(
+                "Pressure and source must have the same number "
+                "of time steps."
+            )
+
+        # ----------------------------------------------------------
+        # 5. Build the reconstruction target from acoustic pressure.
+        #
+        # Target: [1,D,H,W]
+        # Pressure supplied to physics loss: [1,T,D,H,W]
+        # ----------------------------------------------------------
+        target = self._select_pressure_snapshot(
+            pressure_wavefield
         )
 
-        mask = self._to_float_tensor(
-            mask
+        # ----------------------------------------------------------
+        # 6. Generate the observation mask.
+        # ----------------------------------------------------------
+        mask, mask_type = self._generate_mask(
+            self.mask_generator
         )
 
-        self._validate_mask(
-            mask
-        )
+        # ----------------------------------------------------------
+        # 7. Corrupt the target by removing masked samples.
+        #
+        # mask=1 means observed.
+        # mask=0 means missing.
+        # ----------------------------------------------------------
+        input_cube = target * mask
 
-        # =================================================
-        # STEP 8: SIMULATE INCOMPLETE ACQUISITION
-        # =================================================
+        # ----------------------------------------------------------
+        # 8. Final integrity checks.
+        # ----------------------------------------------------------
+        spatial_expected = (1, *self.cube_size)
 
-        input_cube = (
-            target * mask
-        )
-
-        self._validate_tensor(
-            input_cube,
-            "Generated input seismic volume",
-        )
-
-        # =================================================
-        # STEP 9: STORE LIGHTWEIGHT METADATA
-        # =================================================
-
-        self.mask_types[idx] = (
-            mask_type
-        )
-
-        self.geological_modes[idx] = (
-            geological_mode
-        )
-
-        # =================================================
-        # STEP 10: RETURN SAMPLE
-        # =================================================
+        for name, tensor in (
+            ("input_cube", input_cube),
+            ("target", target),
+            ("mask", mask),
+            ("velocity", velocity),
+        ):
+            if tuple(tensor.shape) != spatial_expected:
+                raise RuntimeError(
+                    f"{name} has unexpected shape "
+                    f"{tuple(tensor.shape)}."
+                )
 
         return (
             input_cube,
             target,
             mask,
             velocity,
+            source,
             mask_type,
             geological_mode,
         )
 
-    # =====================================================
-    # DATASET LENGTH
-    # =====================================================
-
-    def __len__(self):
-        """
-        Return number of samples in the dataset.
-        """
-
-        return self.num_samples
-
-    # =====================================================
-    # GET ITEM
-    # =====================================================
-
-    def __getitem__(
-        self,
-        idx,
-    ):
-        """
-        Generate one sample on demand.
-
-        Returns
-        -------
-
-        input_cube
-            Incomplete seismic volume.
-
-        target_cube
-            Complete seismic volume.
-
-        mask
-            Binary sampling mask.
-
-        velocity_model
-            Geologically conditioned velocity model.
-
-        mask_type
-            Missing-data mechanism.
-
-        geological_mode
-            Geological scenario.
-
-        Tensor shape for all four tensors:
-
-            [C, D, H, W]
-        """
-
-        # =================================================
-        # HANDLE TENSOR INDEX
-        # =================================================
-
-        if isinstance(
-            idx,
-            torch.Tensor,
-        ):
-
-            if idx.numel() != 1:
-
-                raise ValueError(
-                    "Dataset index tensor must contain "
-                    "exactly one element."
-                )
-
-            idx = idx.item()
-
-        # =================================================
-        # CONVERT INDEX TO INTEGER
-        # =================================================
-
-        idx = int(idx)
-
-        # =================================================
-        # SUPPORT NEGATIVE INDEXING
-        # =================================================
-
+    def __getitem__(self, idx):
         if idx < 0:
-
             idx += self.num_samples
 
-        # =================================================
-        # VALIDATE INDEX
-        # =================================================
-
-        if idx < 0 or idx >= self.num_samples:
-
+        if not 0 <= idx < self.num_samples:
             raise IndexError(
-                f"Dataset index {idx} is out of range "
-                f"for dataset of size {self.num_samples}."
+                f"Dataset index {idx} is out of range."
             )
 
-        # =================================================
-        # GENERATE SAMPLE LAZILY
-        # =================================================
-
-        return self._generate_sample(
-            idx
-        )
-
-
-# =========================================================
-# STANDALONE DATASET TEST
-# =========================================================
-
-if __name__ == "__main__":
-
-    print()
-    print("=" * 70)
-    print("SYNTHETIC DATASET STANDARD VALIDATION")
-    print("=" * 70)
-
-    # -----------------------------------------------------
-    # Create a 10-sample smoke-test dataset.
-    # -----------------------------------------------------
-
-    dataset = SyntheticSeismicDataset(
-        num_samples=10,
-        cube_size=(64, 128, 128),
-        missing_probability=0.30,
-        geological_mode="random",
-        mask_mode="random",
-        seed=42,
-    )
-
-    # =====================================================
-    # CHECK GEOLOGICAL COVERAGE
-    # =====================================================
-
-    geological_coverage = (
-        dataset.get_geological_coverage()
-    )
-
-    print()
-    print("=" * 70)
-    print("GEOLOGICAL COVERAGE TEST")
-    print("=" * 70)
-
-    for mode in dataset.VALID_GEOLOGICAL_MODES:
-
-        print(
-            f"{mode:<18}: "
-            f"{geological_coverage[mode]}"
-        )
-
-        assert (
-            geological_coverage[mode] > 0
-        ), (
-            "Every geological structure must be represented "
-            "in the 10-sample smoke test."
-        )
-
-    # =====================================================
-    # CHECK MASK COVERAGE
-    # =====================================================
-
-    mask_coverage = (
-        dataset.get_mask_coverage()
-    )
-
-    print()
-    print("=" * 70)
-    print("MASK COVERAGE TEST")
-    print("=" * 70)
-
-    for mask_type in dataset.VALID_MASK_TYPES:
-
-        print(
-            f"{mask_type:<22}: "
-            f"{mask_coverage[mask_type]}"
-        )
-
-        assert (
-            mask_coverage[mask_type] > 0
-        ), (
-            "Every missing-data mechanism must be represented "
-            "in the 10-sample smoke test."
-        )
-
-    # =====================================================
-    # DISPLAY SAMPLE SCHEDULE
-    # =====================================================
-
-    print()
-    print("=" * 70)
-    print("DETERMINISTIC SAMPLE SCHEDULE")
-    print("=" * 70)
-
-    for index in range(
-        len(dataset)
-    ):
-
-        metadata = (
-            dataset.get_sample_metadata(index)
-        )
-
-        print(
-            f"Sample {index:02d} | "
-            f"Geology: "
-            f"{metadata['geological_mode']:<15} | "
-            f"Mask: "
-            f"{metadata['mask_type']}"
-        )
-
-    # =====================================================
-    # GENERATE FIRST SAMPLE
-    # =====================================================
-
-    sample_a = dataset[0]
-
-    input_a = sample_a[0]
-    target_a = sample_a[1]
-    mask_a = sample_a[2]
-    velocity_a = sample_a[3]
-    mask_type_a = sample_a[4]
-    geological_mode_a = sample_a[5]
-
-    # -----------------------------------------------------
-    # Print sample information.
-    # -----------------------------------------------------
-
-    print()
-    print("Sample 0")
-    print("-" * 70)
-
-    print(
-        "Input shape       :",
-        tuple(input_a.shape)
-    )
-
-    print(
-        "Target shape      :",
-        tuple(target_a.shape)
-    )
-
-    print(
-        "Mask shape        :",
-        tuple(mask_a.shape)
-    )
-
-    print(
-        "Velocity shape    :",
-        tuple(velocity_a.shape)
-    )
-
-    print(
-        "Mask type         :",
-        mask_type_a
-    )
-
-    print(
-        "Geological mode   :",
-        geological_mode_a
-    )
-
-    print(
-        "Velocity minimum  :",
-        float(velocity_a.min())
-    )
-
-    print(
-        "Velocity maximum  :",
-        float(velocity_a.max())
-    )
-
-    # =====================================================
-    # REPRODUCIBILITY TEST
-    # =====================================================
-
-    print()
-    print("=" * 70)
-    print("REPRODUCIBILITY TEST")
-    print("=" * 70)
-
-    sample_b = dataset[0]
-
-    input_identical = torch.equal(
-        sample_a[0],
-        sample_b[0],
-    )
-
-    target_identical = torch.equal(
-        sample_a[1],
-        sample_b[1],
-    )
-
-    mask_identical = torch.equal(
-        sample_a[2],
-        sample_b[2],
-    )
-
-    velocity_identical = torch.equal(
-        sample_a[3],
-        sample_b[3],
-    )
-
-    mask_type_identical = (
-        sample_a[4] == sample_b[4]
-    )
-
-    geology_identical = (
-        sample_a[5] == sample_b[5]
-    )
-
-    print(
-        "Input identical    :",
-        input_identical
-    )
-
-    print(
-        "Target identical   :",
-        target_identical
-    )
-
-    print(
-        "Mask identical     :",
-        mask_identical
-    )
-
-    print(
-        "Velocity identical :",
-        velocity_identical
-    )
-
-    print(
-        "Mask type identical:",
-        mask_type_identical
-    )
-
-    print(
-        "Geology identical  :",
-        geology_identical
-    )
-
-    # =====================================================
-    # ASSERT REPRODUCIBILITY
-    # =====================================================
-
-    assert input_identical, (
-        "Repeated generation of the same sample must "
-        "produce an identical input cube."
-    )
-
-    assert target_identical, (
-        "Repeated generation of the same sample must "
-        "produce an identical seismic target."
-    )
-
-    assert mask_identical, (
-        "Repeated generation of the same sample must "
-        "produce an identical sampling mask."
-    )
-
-    assert velocity_identical, (
-        "Repeated generation of the same sample must "
-        "produce an identical velocity model."
-    )
-
-    assert mask_type_identical, (
-        "Repeated generation of the same sample must "
-        "produce the same mask type."
-    )
-
-    assert geology_identical, (
-        "Repeated generation of the same sample must "
-        "produce the same geological mode."
-    )
-
-    # =====================================================
-    # TEST SAMPLE METADATA WITHOUT GENERATION
-    # =====================================================
-
-    metadata = dataset.get_sample_metadata(5)
-
-    assert metadata["geological_mode"] == "highly_complex"
-
-    # =====================================================
-    # FINAL STATUS
-    # =====================================================
-
-    print()
-    print("=" * 70)
-    print("STATUS: SYNTHETIC DATASET VALIDATION PASSED")
-    print("=" * 70)
+        return self._generate_sample(idx)

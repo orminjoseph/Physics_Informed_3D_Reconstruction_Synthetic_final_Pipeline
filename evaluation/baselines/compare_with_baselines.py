@@ -8,7 +8,7 @@ with Predictive Uncertainty for Seismic Data Reconstruction
 
 Purpose
 -------
-Perform a common side-by-side comparison of the six classical
+Perform a common side-by-side comparison of six classical
 reconstruction baselines and the proposed Physics-Informed
 3D Encoder-Decoder model.
 
@@ -24,60 +24,23 @@ Methods
 
 Important
 ---------
-THIS SCRIPT IS NOT THE 750-CASE CONTROLLED EXPERIMENT.
+This is ONE common comparison case, NOT the 750-case
+controlled experiment.
 
-The dedicated controlled-matrix scripts are responsible for the
-750-case experiments.
+All seven methods receive the same corrupted cube and mask.
+Ground truth is used only for post-reconstruction evaluation.
 
-This script performs ONE common side-by-side comparison in which
-all seven methods receive exactly the same:
+The proposed acoustic model returns:
+    reconstructed_cube
+    pressure_wavefield
+    log_variance
 
-    corrupted seismic cube
-    observation mask
-    target cube
-
-Ground truth is used ONLY for post-reconstruction evaluation.
-
-Common metrics
---------------
-    MAE
-    RMSE
-    PSNR
-    SNR
-    SSIM
-    Missing-region MAE
-    Missing-region RMSE
-    Runtime
-    Observed-data preservation error
-
-Proposed-model-specific quantities
-----------------------------------
-    Aleatoric variance
-    Epistemic variance
-    Predictive variance
-    Predictive standard deviation
-
-Input convention
-----------------
-    (C, D, H, W)
-
-Network convention
-------------------
-    (B, C, D, H, W)
-
-Mask convention
----------------
-    1 = observed
-    0 = missing
-
-Checkpoint
-----------
-    outputs/<experiment_name>/checkpoints/best_model.pth
+MC-Dropout retains reconstruction and log-variance samples only.
+Full pressure-wavefield samples are not stacked or retained.
 
 Author: Ormin Joseph
 ======================================================================
 """
-
 
 # =====================================================================
 # IMPORTS
@@ -103,9 +66,6 @@ from dataset.synthetic_dataset import (
 
 # =====================================================================
 # CLASSICAL BASELINES
-#
-# These imports point to the final baseline implementations under
-# evaluation/baselines/.
 # =====================================================================
 
 from evaluation.baselines.baseline_nearest_neighbor_controlled_matrix import (
@@ -163,6 +123,8 @@ from metrics.reconstruction_metrics import (
 # CENTRALIZED CONFIGURATION
 # =====================================================================
 
+from utils import config
+
 from utils.config import (
     BASELINE_NUM_SAMPLES,
     BASELINE_CUBE_SIZE,
@@ -170,20 +132,14 @@ from utils.config import (
     BASELINE_GEOLOGICAL_MODE,
     BASELINE_MASK_MODE,
     BASELINE_SEED,
-
     OBSERVED_PRESERVATION_TOLERANCE,
-
     USE_ATTENTION,
     USE_RESIDUAL,
     USE_UNCERTAINTY,
-
     MC_DROPOUT_SAMPLES,
-
     LOG_VARIANCE_MIN,
     LOG_VARIANCE_MAX,
-
     DEVICE as CONFIG_DEVICE,
-
     CHECKPOINT_DIR,
     REPORT_DIR as CONFIG_REPORT_DIR,
 )
@@ -193,10 +149,11 @@ from utils.config import (
 # PROJECT ROOT
 # =====================================================================
 
+# This script is located in evaluation/.
+# parents[0] = evaluation/
+# parents[1] = project root/
 PROJECT_ROOT = (
-    Path(__file__)
-    .resolve()
-    .parents[2]
+    Path(__file__).resolve().parents[1]
 )
 
 
@@ -204,7 +161,7 @@ PROJECT_ROOT = (
 # COMMON COMPARISON CONFIGURATION
 # =====================================================================
 
-CUBE_SIZE = BASELINE_CUBE_SIZE
+CUBE_SIZE = tuple(BASELINE_CUBE_SIZE)
 
 NUM_SAMPLES = BASELINE_NUM_SAMPLES
 
@@ -244,7 +201,6 @@ REPORT_DIR = (
     / Path(CONFIG_REPORT_DIR)
 )
 
-
 REPORT_DIR.mkdir(
     parents=True,
     exist_ok=True,
@@ -260,7 +216,6 @@ RESULTS_FILE = (
     / "baseline_comparison.csv"
 )
 
-
 SUMMARY_FILE = (
     REPORT_DIR
     / "baseline_comparison_summary.csv"
@@ -271,122 +226,90 @@ SUMMARY_FILE = (
 # DEVICE RESOLUTION
 # =====================================================================
 
-def resolve_device(
-    configured_device,
-) -> torch.device:
+def resolve_device(configured_device) -> torch.device:
     """
     Resolve the centralized DEVICE configuration.
 
     Supported values:
-        "auto"
-        "cpu"
-        "cuda"
+        auto
+        cpu
+        cuda
     """
 
-    if configured_device == "auto":
+    configured_device = str(configured_device).lower()
 
+    if configured_device == "auto":
         return torch.device(
-            "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
+            "cuda" if torch.cuda.is_available() else "cpu"
         )
 
     if configured_device == "cuda":
-
         if not torch.cuda.is_available():
-
             raise RuntimeError(
-                "DEVICE='cuda' is configured, "
-                "but CUDA is not available."
+                "DEVICE='cuda' is configured, but CUDA is unavailable."
             )
 
-        return torch.device(
-            "cuda"
-        )
+        return torch.device("cuda")
 
-    return torch.device(
-        "cpu"
+    if configured_device == "cpu":
+        return torch.device("cpu")
+
+    raise ValueError(
+        f"Invalid DEVICE configuration: {configured_device!r}. "
+        "Expected 'auto', 'cpu', or 'cuda'."
     )
 
 
-DEVICE = resolve_device(
-    CONFIG_DEVICE
-)
+DEVICE = resolve_device(CONFIG_DEVICE)
 
 
 # =====================================================================
 # REPRODUCIBILITY
 # =====================================================================
 
-def set_seed(
-    seed: int,
-) -> None:
-    """
-    Set random seeds for reproducibility.
-    """
+def set_seed(seed: int) -> None:
+    """Set random seeds for reproducibility."""
 
     random.seed(seed)
-
     np.random.seed(seed)
-
     torch.manual_seed(seed)
 
     if torch.cuda.is_available():
-
-        torch.cuda.manual_seed_all(
-            seed
-        )
+        torch.cuda.manual_seed_all(seed)
 
 
 # =====================================================================
 # FINITE TENSOR CHECK
 # =====================================================================
 
-def tensor_is_finite(
-    tensor: torch.Tensor,
-) -> bool:
-    """
-    Return True when every tensor element is finite.
-    """
+def tensor_is_finite(tensor: torch.Tensor) -> bool:
+    """Return True when every tensor element is finite."""
 
-    return bool(
-        torch.isfinite(
-            tensor
-        ).all().item()
-    )
+    return bool(torch.isfinite(tensor).all().item())
 
 
 # =====================================================================
 # METRIC CONVERSION
 # =====================================================================
 
-def metric_to_float(
-    value,
-) -> float:
-    """
-    Convert a tensor, NumPy scalar, or Python numeric value
-    into a Python float.
-    """
+def metric_to_float(value) -> float:
+    """Convert a tensor, NumPy scalar, or Python number to float."""
 
-    if isinstance(
-        value,
-        torch.Tensor,
-    ):
+    if isinstance(value, torch.Tensor):
+        if value.numel() != 1:
+            raise ValueError(
+                "Expected a scalar tensor for metric conversion."
+            )
 
-        return float(
-            value.detach()
-            .cpu()
-            .item()
-        )
+        return float(value.detach().cpu().item())
 
-    if isinstance(
-        value,
-        np.ndarray,
-    ):
+    if isinstance(value, np.ndarray):
+        if value.size != 1:
+            raise ValueError(
+                "Expected a scalar NumPy array for metric conversion."
+            )
 
-        return float(
-            value.item()
-        )
+        return float(value.item())
 
     return float(value)
 
@@ -404,15 +327,9 @@ def validate_common_input(
     """
     Validate the common comparison dataset.
 
-    All seven methods receive the same input cube and mask.
-
     Dataset convention:
         (C, D, H, W)
     """
-
-    # -----------------------------------------------------------------
-    # Tensor type checks.
-    # -----------------------------------------------------------------
 
     tensors = {
         "corrupted": corrupted,
@@ -422,36 +339,18 @@ def validate_common_input(
     }
 
     for name, tensor in tensors.items():
-
-        if not isinstance(
-            tensor,
-            torch.Tensor,
-        ):
-
+        if not isinstance(tensor, torch.Tensor):
             raise TypeError(
                 f"{name} must be a torch.Tensor."
             )
 
-    # -----------------------------------------------------------------
-    # Expected 4-D convention.
-    # -----------------------------------------------------------------
-
-    for name, tensor in tensors.items():
-
         if tensor.ndim != 4:
-
             raise ValueError(
-                f"{name} must have shape "
-                "(C, D, H, W). "
+                f"{name} must have shape (C, D, H, W). "
                 f"Received: {tuple(tensor.shape)}"
             )
 
-    # -----------------------------------------------------------------
-    # Shape consistency.
-    # -----------------------------------------------------------------
-
     if corrupted.shape != target.shape:
-
         raise RuntimeError(
             "Corrupted and target shapes differ. "
             f"Corrupted: {tuple(corrupted.shape)}; "
@@ -459,95 +358,51 @@ def validate_common_input(
         )
 
     if corrupted.shape != mask.shape:
-
         raise RuntimeError(
             "Corrupted and mask shapes differ."
         )
 
     if corrupted.shape != velocity.shape:
-
         raise RuntimeError(
             "Corrupted and velocity shapes differ."
         )
 
-    # -----------------------------------------------------------------
-    # Expected benchmark shape.
-    # -----------------------------------------------------------------
-
-    expected_shape = (
-        1,
-        *CUBE_SIZE,
-    )
+    expected_shape = (1, *CUBE_SIZE)
 
     if tuple(corrupted.shape) != expected_shape:
-
         raise RuntimeError(
             "Unexpected benchmark cube shape. "
             f"Expected: {expected_shape}; "
             f"Received: {tuple(corrupted.shape)}"
         )
 
-    # -----------------------------------------------------------------
-    # Finite-value checks.
-    # -----------------------------------------------------------------
-
     for name, tensor in tensors.items():
-
-        if not tensor_is_finite(
-            tensor
-        ):
-
+        if not tensor_is_finite(tensor):
             raise RuntimeError(
                 f"{name} contains NaN or Inf."
             )
 
-    # -----------------------------------------------------------------
-    # Binary mask validation.
-    # -----------------------------------------------------------------
+    unique_mask = torch.unique(mask)
 
-    unique_mask = torch.unique(
-        mask
-    )
-
-    if not torch.all(
-        (unique_mask == 0)
-        |
-        (unique_mask == 1)
+    if not bool(
+        ((unique_mask == 0) | (unique_mask == 1)).all().item()
     ):
-
         raise RuntimeError(
             "Mask must contain only 0 and 1. "
             f"Received: {unique_mask.tolist()}"
         )
 
-    # -----------------------------------------------------------------
-    # At least one observed and one missing sample.
-    # -----------------------------------------------------------------
-
-    observed_count = int(
-        (mask == 1)
-        .sum()
-        .item()
-    )
-
-    missing_count = int(
-        (mask == 0)
-        .sum()
-        .item()
-    )
+    observed_count = int((mask == 1).sum().item())
+    missing_count = int((mask == 0).sum().item())
 
     if observed_count == 0:
-
         raise RuntimeError(
-            "The common comparison sample contains "
-            "no observed samples."
+            "The common comparison sample contains no observed samples."
         )
 
     if missing_count == 0:
-
         raise RuntimeError(
-            "The common comparison sample contains "
-            "no missing samples."
+            "The common comparison sample contains no missing samples."
         )
 
 
@@ -561,13 +416,10 @@ def validate_reconstruction(
     mask: torch.Tensor,
 ) -> float:
     """
-    Validate one reconstructed cube.
+    Validate a reconstructed cube.
 
-    Checks:
-        1. Tensor type
-        2. Shape
-        3. Finite values
-        4. Exact observed-data preservation
+    Checks tensor type, shape, finite values, and preservation
+    of the observed input samples.
 
     Returns
     -------
@@ -575,67 +427,40 @@ def validate_reconstruction(
         Maximum observed-data preservation error.
     """
 
-    if not isinstance(
-        reconstruction,
-        torch.Tensor,
-    ):
-
+    if not isinstance(reconstruction, torch.Tensor):
         raise TypeError(
             "Reconstruction must be a torch.Tensor."
         )
 
-    if (
-        reconstruction.shape
-        != corrupted.shape
-    ):
-
+    if reconstruction.shape != corrupted.shape:
         raise RuntimeError(
             "Reconstruction shape mismatch. "
             f"Expected: {tuple(corrupted.shape)}; "
             f"Received: {tuple(reconstruction.shape)}"
         )
 
-    if not tensor_is_finite(
-        reconstruction
-    ):
-
+    if not tensor_is_finite(reconstruction):
         raise RuntimeError(
             "Reconstruction contains NaN or Inf."
         )
 
-    observed_selector = (
-        mask == 1
-    )
+    observed_selector = mask == 1
 
     observed_difference = torch.max(
         torch.abs(
-            reconstruction[
-                observed_selector
-            ]
-            -
-            corrupted[
-                observed_selector
-            ]
+            reconstruction[observed_selector]
+            - corrupted[observed_selector]
         )
     ).item()
 
-    if (
-        observed_difference
-        >
-        OBSERVED_PRESERVATION_TOLERANCE
-    ):
-
+    if observed_difference > OBSERVED_PRESERVATION_TOLERANCE:
         raise RuntimeError(
             "Observed-data preservation failed. "
-            f"Maximum difference: "
-            f"{observed_difference:.6e}; "
-            f"Tolerance: "
-            f"{OBSERVED_PRESERVATION_TOLERANCE:.6e}"
+            f"Maximum difference: {observed_difference:.6e}; "
+            f"Tolerance: {OBSERVED_PRESERVATION_TOLERANCE:.6e}"
         )
 
-    return float(
-        observed_difference
-    )
+    return float(observed_difference)
 
 
 # =====================================================================
@@ -648,173 +473,57 @@ def calculate_metrics(
     mask: torch.Tensor,
 ) -> dict:
     """
-    Calculate common global and missing-region metrics.
+    Calculate global and missing-region reconstruction metrics.
 
     Input convention:
         (C, D, H, W)
-
-    The centralized metrics module is used for global metrics.
     """
 
-    # -----------------------------------------------------------------
-    # Missing-region selector.
-    # -----------------------------------------------------------------
+    missing_selector = mask == 0
 
-    missing_selector = (
-        mask == 0
-    )
+    missing_prediction = reconstruction[missing_selector]
+    missing_target = target[missing_selector]
 
-    missing_prediction = (
-        reconstruction[
-            missing_selector
-        ]
-    )
-
-    missing_target = (
-        target[
-            missing_selector
-        ]
-    )
-
-    if (
-        missing_prediction.numel()
-        == 0
-    ):
-
+    if missing_prediction.numel() == 0:
         raise RuntimeError(
-            "No missing samples available "
-            "for missing-region metrics."
+            "No missing samples available for missing-region metrics."
         )
-
-    # -----------------------------------------------------------------
-    # Missing-region MAE.
-    # -----------------------------------------------------------------
 
     missing_mae = float(
         torch.mean(
-            torch.abs(
-                missing_prediction
-                -
-                missing_target
-            )
+            torch.abs(missing_prediction - missing_target)
         ).item()
     )
-
-    # -----------------------------------------------------------------
-    # Missing-region RMSE.
-    # -----------------------------------------------------------------
 
     missing_rmse = float(
         torch.sqrt(
             torch.mean(
-                (
-                    missing_prediction
-                    -
-                    missing_target
-                ) ** 2
+                (missing_prediction - missing_target) ** 2
             )
         ).item()
     )
 
-    # -----------------------------------------------------------------
-    # Convert:
-    #
-    # (C,D,H,W)
-    #
-    # to:
-    #
-    # (B,C,D,H,W)
-    # -----------------------------------------------------------------
-
-    reconstruction_batch = (
-        reconstruction
-        .unsqueeze(0)
-        .to(DEVICE)
-    )
-
-    target_batch = (
-        target
-        .unsqueeze(0)
-        .to(DEVICE)
-    )
-
-    # -----------------------------------------------------------------
-    # Global MAE.
-    # -----------------------------------------------------------------
-
-    metric_mae = metric_to_float(
-        mae(
-            reconstruction_batch,
-            target_batch,
-        )
-    )
-
-    # -----------------------------------------------------------------
-    # Global RMSE.
-    # -----------------------------------------------------------------
-
-    metric_rmse = metric_to_float(
-        rmse(
-            reconstruction_batch,
-            target_batch,
-        )
-    )
-
-    # -----------------------------------------------------------------
-    # Global PSNR.
-    # -----------------------------------------------------------------
-
-    metric_psnr = metric_to_float(
-        psnr(
-            reconstruction_batch,
-            target_batch,
-        )
-    )
-
-    # -----------------------------------------------------------------
-    # Global SNR.
-    # -----------------------------------------------------------------
-
-    metric_snr = metric_to_float(
-        snr(
-            reconstruction_batch,
-            target_batch,
-        )
-    )
-
-    # -----------------------------------------------------------------
-    # Global SSIM.
-    # -----------------------------------------------------------------
-
-    metric_ssim = metric_to_float(
-        ssim(
-            reconstruction_batch,
-            target_batch,
-        )
-    )
+    reconstruction_batch = reconstruction.unsqueeze(0).to(DEVICE)
+    target_batch = target.unsqueeze(0).to(DEVICE)
 
     return {
-
-        "MAE":
-            metric_mae,
-
-        "RMSE":
-            metric_rmse,
-
-        "PSNR":
-            metric_psnr,
-
-        "SNR":
-            metric_snr,
-
-        "SSIM":
-            metric_ssim,
-
-        "missing_mae":
-            missing_mae,
-
-        "missing_rmse":
-            missing_rmse,
+        "MAE": metric_to_float(
+            mae(reconstruction_batch, target_batch)
+        ),
+        "RMSE": metric_to_float(
+            rmse(reconstruction_batch, target_batch)
+        ),
+        "PSNR": metric_to_float(
+            psnr(reconstruction_batch, target_batch)
+        ),
+        "SNR": metric_to_float(
+            snr(reconstruction_batch, target_batch)
+        ),
+        "SSIM": metric_to_float(
+            ssim(reconstruction_batch, target_batch)
+        ),
+        "missing_mae": missing_mae,
+        "missing_rmse": missing_rmse,
     }
 
 
@@ -824,11 +533,13 @@ def calculate_metrics(
 
 def load_proposed_model():
     """
-    Load the frozen proposed Physics-Informed 3-D model.
+    Load the configured acoustic Physics-Informed 3-D model.
+
+    The model architecture must match the trained checkpoint,
+    including the configured acoustic pressure-wavefield time steps.
     """
 
     if not CHECKPOINT.is_file():
-
         raise FileNotFoundError(
             "Proposed-model checkpoint was not found:\n"
             f"{CHECKPOINT}"
@@ -836,87 +547,55 @@ def load_proposed_model():
 
     print()
     print("=" * 78)
-    print(
-        "LOADING PROPOSED MODEL"
-    )
+    print("LOADING PROPOSED MODEL")
     print("=" * 78)
-
-    print()
+    print(f"Checkpoint          : {CHECKPOINT}")
+    print(f"Device              : {DEVICE}")
     print(
-        f"Checkpoint: {CHECKPOINT}"
+        "Acoustic time steps :",
+        config.ACOUSTIC_TIME_STEPS,
     )
 
-    print(
-        f"Device: {DEVICE}"
-    )
-
-    # -----------------------------------------------------------------
-    # Construct the same architecture used by the trained checkpoint.
-    # -----------------------------------------------------------------
-
+    # Construct the same architecture as the trained acoustic model.
     model = Network3D(
         use_attention=USE_ATTENTION,
         use_residual=USE_RESIDUAL,
         use_uncertainty=USE_UNCERTAINTY,
-    )
+        pressure_time_steps=config.ACOUSTIC_TIME_STEPS,
+    ).to(DEVICE)
 
-    model = model.to(
-        DEVICE
-    )
-
-    # -----------------------------------------------------------------
-    # Load checkpoint.
-    # -----------------------------------------------------------------
-
+    # Load the checkpoint on the selected device.
     checkpoint = torch.load(
         CHECKPOINT,
         map_location=DEVICE,
     )
 
-    if not isinstance(
-        checkpoint,
-        dict,
-    ):
-
+    if not isinstance(checkpoint, dict):
         raise TypeError(
             "Checkpoint must contain a dictionary."
         )
 
-    if (
-        "model_state_dict"
-        not in checkpoint
-    ):
-
+    if "model_state_dict" not in checkpoint:
         raise KeyError(
-            "Checkpoint does not contain "
-            "'model_state_dict'."
+            "Checkpoint does not contain 'model_state_dict'."
         )
 
     model.load_state_dict(
-        checkpoint[
-            "model_state_dict"
-        ]
+        checkpoint["model_state_dict"],
+        strict=True,
     )
 
     model.eval()
 
-    print()
-    print(
-        "Proposed model loaded successfully."
-    )
+    print("Proposed model loaded successfully.")
 
     if "best_epoch" in checkpoint:
-
-        print(
-            f"Best epoch: "
-            f"{checkpoint['best_epoch']}"
-        )
+        print(f"Best epoch           : {checkpoint['best_epoch']}")
 
     if "best_val_loss" in checkpoint:
-
         print(
-            f"Best validation loss: "
-            f"{checkpoint['best_val_loss']}"
+            "Best validation loss :",
+            checkpoint["best_val_loss"],
         )
 
     return model
@@ -934,55 +613,31 @@ def run_classical_method(
     target: torch.Tensor,
 ) -> dict:
     """
-    Run one classical baseline using the common corrupted cube
-    and common observation mask.
+    Run one classical baseline.
 
-    Ground truth is NOT supplied to the reconstruction function.
+    Ground truth is deliberately not passed to the reconstruction
+    function. It is used only after reconstruction for evaluation.
     """
 
     print()
     print("-" * 78)
-    print(
-        f"METHOD: {method_name}"
-    )
+    print(f"METHOD: {method_name}")
     print("-" * 78)
 
-    start_time = (
-        time.perf_counter()
+    start_time = time.perf_counter()
+
+    reconstruction = reconstruction_function(
+        corrupted,
+        mask,
     )
 
-    # -----------------------------------------------------------------
-    # Ground truth is intentionally NOT supplied.
-    # -----------------------------------------------------------------
+    runtime_seconds = time.perf_counter() - start_time
 
-    reconstruction = (
-        reconstruction_function(
-            corrupted,
-            mask,
-        )
+    preservation_error = validate_reconstruction(
+        reconstruction,
+        corrupted,
+        mask,
     )
-
-    runtime_seconds = (
-        time.perf_counter()
-        -
-        start_time
-    )
-
-    # -----------------------------------------------------------------
-    # Validate reconstruction.
-    # -----------------------------------------------------------------
-
-    preservation_error = (
-        validate_reconstruction(
-            reconstruction,
-            corrupted,
-            mask,
-        )
-    )
-
-    # -----------------------------------------------------------------
-    # Calculate metrics.
-    # -----------------------------------------------------------------
 
     metrics = calculate_metrics(
         reconstruction,
@@ -991,132 +646,44 @@ def run_classical_method(
     )
 
     result = {
-
-        "method":
-            method_name,
-
-        "geological_mode":
-            GEOLOGICAL_MODE,
-
-        "mask_mode":
-            MASK_MODE,
-
-        "seed":
-            int(SEED),
-
-        "requested_missing_rate":
-            float(MISSING_RATE),
-
-        "cube_depth":
-            int(CUBE_SIZE[0]),
-
-        "cube_height":
-            int(CUBE_SIZE[1]),
-
-        "cube_width":
-            int(CUBE_SIZE[2]),
-
-        "runtime_seconds":
-            float(runtime_seconds),
-
-        "observed_preservation_error":
-            float(preservation_error),
-
-        "MAE":
-            metrics["MAE"],
-
-        "RMSE":
-            metrics["RMSE"],
-
-        "PSNR":
-            metrics["PSNR"],
-
-        "SNR":
-            metrics["SNR"],
-
-        "SSIM":
-            metrics["SSIM"],
-
-        "missing_mae":
-            metrics["missing_mae"],
-
-        "missing_rmse":
-            metrics["missing_rmse"],
-
-        # -------------------------------------------------------------
-        # Classical methods do not produce predictive uncertainty.
-        # -------------------------------------------------------------
-
-        "aleatoric_variance_mean":
-            np.nan,
-
-        "epistemic_variance_mean":
-            np.nan,
-
-        "predictive_variance_mean":
-            np.nan,
-
-        "predictive_std_mean":
-            np.nan,
-
-        "missing_aleatoric_variance_mean":
-            np.nan,
-
-        "missing_epistemic_variance_mean":
-            np.nan,
-
-        "missing_predictive_variance_mean":
-            np.nan,
-
-        "missing_predictive_std_mean":
-            np.nan,
-
-        "status":
-            "PASS",
-
-        "error":
-            "",
+        "method": method_name,
+        "geological_mode": GEOLOGICAL_MODE,
+        "mask_mode": MASK_MODE,
+        "seed": int(SEED),
+        "requested_missing_rate": float(MISSING_RATE),
+        "cube_depth": int(CUBE_SIZE[0]),
+        "cube_height": int(CUBE_SIZE[1]),
+        "cube_width": int(CUBE_SIZE[2]),
+        "runtime_seconds": float(runtime_seconds),
+        "observed_preservation_error": float(preservation_error),
+        "MAE": metrics["MAE"],
+        "RMSE": metrics["RMSE"],
+        "PSNR": metrics["PSNR"],
+        "SNR": metrics["SNR"],
+        "SSIM": metrics["SSIM"],
+        "missing_mae": metrics["missing_mae"],
+        "missing_rmse": metrics["missing_rmse"],
+        "aleatoric_variance_mean": np.nan,
+        "epistemic_variance_mean": np.nan,
+        "predictive_variance_mean": np.nan,
+        "predictive_std_mean": np.nan,
+        "missing_aleatoric_variance_mean": np.nan,
+        "missing_epistemic_variance_mean": np.nan,
+        "missing_predictive_variance_mean": np.nan,
+        "missing_predictive_std_mean": np.nan,
+        "status": "PASS",
+        "error": "",
     }
 
-    print(
-        f"MAE          : {result['MAE']:.6f}"
-    )
-
-    print(
-        f"RMSE         : {result['RMSE']:.6f}"
-    )
-
-    print(
-        f"PSNR         : {result['PSNR']:.6f} dB"
-    )
-
-    print(
-        f"SNR          : {result['SNR']:.6f} dB"
-    )
-
-    print(
-        f"SSIM         : {result['SSIM']:.6f}"
-    )
-
-    print(
-        f"Missing MAE  : "
-        f"{result['missing_mae']:.6f}"
-    )
-
-    print(
-        f"Missing RMSE : "
-        f"{result['missing_rmse']:.6f}"
-    )
-
-    print(
-        f"Runtime      : "
-        f"{result['runtime_seconds']:.4f} s"
-    )
-
-    print(
-        f"Observed err : "
-        f"{result['observed_preservation_error']:.6e}"
-    )
+    print(f"MAE          : {result['MAE']:.6f}")
+    print(f"RMSE         : {result['RMSE']:.6f}")
+    print(f"PSNR         : {result['PSNR']:.6f} dB")
+    print(f"SNR          : {result['SNR']:.6f} dB")
+    print(f"SSIM         : {result['SSIM']:.6f}")
+    print(f"Missing MAE  : {result['missing_mae']:.6f}")
+    print(f"Missing RMSE : {result['missing_rmse']:.6f}")
+    print(f"Runtime      : {result['runtime_seconds']:.4f} s")
+    print(f"Observed err : {result['observed_preservation_error']:.6e}")
 
     return result
 
@@ -1132,150 +699,65 @@ def run_proposed_model(
     target: torch.Tensor,
 ) -> dict:
     """
-    Run the frozen proposed Physics-Informed 3-D model.
+    Run the proposed acoustic Physics-Informed 3-D model.
 
     Input:
-        corrupted : (C,D,H,W)
-        mask      : (C,D,H,W)
+        corrupted: (C,D,H,W)
+        mask:      (C,D,H,W)
 
     Network input:
         (B,C,D,H,W)
 
-    Ground truth is used ONLY for evaluation.
-
-    Predictive uncertainty is calculated using the centralized
-    PredictiveUncertaintyEstimator.
+    The pressure wavefield is generated by the network but is not
+    retained as a collection of MC samples. Reconstruction uncertainty
+    is calculated from reconstruction and log-variance samples.
     """
 
     print()
     print("-" * 78)
-    print(
-        "METHOD: proposed_physics_informed_3d"
-    )
+    print("METHOD: proposed_physics_informed_3d")
     print("-" * 78)
 
-    # =================================================================
-    # PREPARE NETWORK INPUT
-    # =================================================================
+    input_batch = corrupted.unsqueeze(0).to(DEVICE)
+    corrupted_batch = corrupted.unsqueeze(0).to(DEVICE)
+    mask_batch = mask.unsqueeze(0).to(DEVICE)
 
-    # -----------------------------------------------------------------
-    # The dataset provides:
-    #
-    #     corrupted = (C,D,H,W)
-    #
-    # Add exactly ONE batch dimension:
-    #
-    #     (C,D,H,W)
-    #          ↓
-    #     (B,C,D,H,W)
-    # -----------------------------------------------------------------
+    expected_network_shape = (1, 1, *CUBE_SIZE)
 
-    input_batch = (
-        corrupted
-        .unsqueeze(0)
-        .to(DEVICE)
-    )
-
-    # -----------------------------------------------------------------
-    # Prepare mask and corrupted input for data consistency.
-    # -----------------------------------------------------------------
-
-    corrupted_batch = (
-        corrupted
-        .unsqueeze(0)
-        .to(DEVICE)
-    )
-
-    mask_batch = (
-        mask
-        .unsqueeze(0)
-        .to(DEVICE)
-    )
-
-    # =================================================================
-    # INPUT SHAPE VALIDATION
-    # =================================================================
-
-    expected_network_shape = (
-        1,
-        1,
-        *CUBE_SIZE,
-    )
-
-    if tuple(
-        input_batch.shape
-    ) != expected_network_shape:
-
+    if tuple(input_batch.shape) != expected_network_shape:
         raise RuntimeError(
             "Unexpected proposed-model input shape. "
             f"Expected: {expected_network_shape}; "
             f"Received: {tuple(input_batch.shape)}"
         )
 
-    # =================================================================
-    # MC-DROPOUT PREDICTOR
-    # =================================================================
-
+    # MC-Dropout defaults to not storing pressure-wavefield samples.
     predictor = MCDropout3D(
         model=model,
         num_samples=MC_SAMPLES,
     )
 
-    # =================================================================
-    # MC-DROPOUT INFERENCE
-    # =================================================================
+    start_time = time.perf_counter()
 
-    start_time = (
-        time.perf_counter()
-    )
+    predictions = predictor.predict(input_batch)
 
-    predictions = predictor.predict(
-        input_batch
-    )
-
-    runtime_seconds = (
-        time.perf_counter()
-        -
-        start_time
-    )
-
-    # =================================================================
-    # VALIDATE MC OUTPUT
-    # =================================================================
+    runtime_seconds = time.perf_counter() - start_time
 
     required_keys = {
         "reconstruction_samples",
         "log_variance_samples",
     }
 
-    missing_keys = (
-        required_keys
-        -
-        predictions.keys()
-    )
+    missing_keys = required_keys - predictions.keys()
 
     if missing_keys:
-
         raise KeyError(
-            "The MC-Dropout predictor did not return "
-            f"the required outputs: {missing_keys}"
+            "MC-Dropout predictor did not return required outputs: "
+            f"{missing_keys}"
         )
 
-    reconstruction_samples = (
-        predictions[
-            "reconstruction_samples"
-        ]
-    )
-
-    log_variance_samples = (
-        predictions[
-            "log_variance_samples"
-        ]
-    )
-
-    # =================================================================
-    # MC OUTPUT SHAPE VALIDATION
-    # =================================================================
+    reconstruction_samples = predictions["reconstruction_samples"]
+    log_variance_samples = predictions["log_variance_samples"]
 
     expected_mc_shape = (
         MC_SAMPLES,
@@ -1284,97 +766,43 @@ def run_proposed_model(
         *CUBE_SIZE,
     )
 
-    if tuple(
-        reconstruction_samples.shape
-    ) != expected_mc_shape:
-
+    if tuple(reconstruction_samples.shape) != expected_mc_shape:
         raise RuntimeError(
             "Unexpected reconstruction MC-sample shape. "
             f"Expected: {expected_mc_shape}; "
-            f"Received: "
-            f"{tuple(reconstruction_samples.shape)}"
+            f"Received: {tuple(reconstruction_samples.shape)}"
         )
 
-    if tuple(
-        log_variance_samples.shape
-    ) != expected_mc_shape:
-
+    if tuple(log_variance_samples.shape) != expected_mc_shape:
         raise RuntimeError(
             "Unexpected log-variance MC-sample shape. "
             f"Expected: {expected_mc_shape}; "
-            f"Received: "
-            f"{tuple(log_variance_samples.shape)}"
+            f"Received: {tuple(log_variance_samples.shape)}"
         )
 
-    # =================================================================
-    # FINITE MC OUTPUT VALIDATION
-    # =================================================================
-
-    if not tensor_is_finite(
-        reconstruction_samples
-    ):
-
+    if not tensor_is_finite(reconstruction_samples):
         raise RuntimeError(
             "MC reconstruction samples contain NaN or Inf."
         )
 
-    if not tensor_is_finite(
-        log_variance_samples
-    ):
-
+    if not tensor_is_finite(log_variance_samples):
         raise RuntimeError(
             "MC log-variance samples contain NaN or Inf."
         )
 
-    # =================================================================
-    # MC MEAN RECONSTRUCTION
-    # =================================================================
+    # Average stochastic reconstruction samples.
+    reconstruction_mean = reconstruction_samples.mean(dim=0)
 
-    reconstruction_mean = (
-        reconstruction_samples.mean(
-            dim=0
-        )
+    # Estimate aleatoric, epistemic, and predictive uncertainty.
+    uncertainty_estimator = PredictiveUncertaintyEstimator(
+        min_log_variance=LOG_VARIANCE_MIN,
+        max_log_variance=LOG_VARIANCE_MAX,
     )
 
-    # =================================================================
-    # PREDICTIVE UNCERTAINTY ESTIMATOR
-    # =================================================================
-
-    # -----------------------------------------------------------------
-    # IMPORTANT CORRECTION:
-    #
-    # PredictiveUncertaintyEstimator methods are instance methods.
-    #
-    # Therefore DO NOT use:
-    #
-    # PredictiveUncertaintyEstimator.aleatoric_variance(...)
-    #
-    # Instead create one estimator instance and call it.
-    # -----------------------------------------------------------------
-
-    uncertainty_estimator = (
-        PredictiveUncertaintyEstimator(
-            min_log_variance=
-                LOG_VARIANCE_MIN,
-            max_log_variance=
-                LOG_VARIANCE_MAX,
-        )
+    uncertainty_results = uncertainty_estimator(
+        log_variance_samples,
+        reconstruction_samples,
     )
-
-    # =================================================================
-    # CALCULATE ALEATORIC, EPISTEMIC AND PREDICTIVE UNCERTAINTY
-    # =================================================================
-
-    uncertainty_results = (
-        uncertainty_estimator(
-            log_variance_samples,
-            reconstruction_samples,
-        )
-    )
-
-    # =================================================================
-    # EXTRACT CENTRALIZED UNCERTAINTY RESULTS
-    # =================================================================
 
     required_uncertainty_keys = {
         "aleatoric_variance",
@@ -1384,214 +812,83 @@ def run_proposed_model(
     }
 
     missing_uncertainty_keys = (
-        required_uncertainty_keys
-        -
-        uncertainty_results.keys()
+        required_uncertainty_keys - uncertainty_results.keys()
     )
 
     if missing_uncertainty_keys:
-
         raise KeyError(
-            "Predictive uncertainty estimator did not return "
-            f"the required outputs: "
+            "Predictive uncertainty estimator did not return: "
             f"{missing_uncertainty_keys}"
         )
 
-    aleatoric_variance = (
-        uncertainty_results[
-            "aleatoric_variance"
-        ]
-    )
+    aleatoric_variance = uncertainty_results["aleatoric_variance"]
+    epistemic_variance = uncertainty_results["epistemic_variance"]
+    predictive_variance = uncertainty_results["predictive_variance"]
+    predictive_std = uncertainty_results["predictive_std"]
 
-    epistemic_variance = (
-        uncertainty_results[
-            "epistemic_variance"
-        ]
-    )
-
-    predictive_variance = (
-        uncertainty_results[
-            "predictive_variance"
-        ]
-    )
-
-    predictive_std = (
-        uncertainty_results[
-            "predictive_std"
-        ]
-    )
-
-    # =================================================================
-    # UNCERTAINTY SHAPE VALIDATION
-    # =================================================================
-
-    expected_uncertainty_shape = (
-        1,
-        1,
-        *CUBE_SIZE,
-    )
+    expected_uncertainty_shape = (1, 1, *CUBE_SIZE)
 
     uncertainty_tensors = {
-
-        "aleatoric_variance":
-            aleatoric_variance,
-
-        "epistemic_variance":
-            epistemic_variance,
-
-        "predictive_variance":
-            predictive_variance,
-
-        "predictive_std":
-            predictive_std,
+        "aleatoric_variance": aleatoric_variance,
+        "epistemic_variance": epistemic_variance,
+        "predictive_variance": predictive_variance,
+        "predictive_std": predictive_std,
     }
 
-    for (
-        name,
-        tensor,
-    ) in uncertainty_tensors.items():
-
-        if tuple(
-            tensor.shape
-        ) != expected_uncertainty_shape:
-
+    for name, tensor in uncertainty_tensors.items():
+        if tuple(tensor.shape) != expected_uncertainty_shape:
             raise RuntimeError(
                 f"Unexpected {name} shape. "
-                f"Expected: "
-                f"{expected_uncertainty_shape}; "
-                f"Received: "
-                f"{tuple(tensor.shape)}"
+                f"Expected: {expected_uncertainty_shape}; "
+                f"Received: {tuple(tensor.shape)}"
             )
 
-        if not tensor_is_finite(
-            tensor
-        ):
-
+        if not tensor_is_finite(tensor):
             raise RuntimeError(
                 f"{name} contains NaN or Inf."
             )
 
-        if (
-            "variance" in name
-            and
-            (tensor < 0).any()
-        ):
-
+        if "variance" in name and bool((tensor < 0).any().item()):
             raise RuntimeError(
                 f"Negative values detected in {name}."
             )
 
-    # =================================================================
-    # PREDICTIVE VARIANCE DECOMPOSITION CHECK
-    # =================================================================
-
+    # Verify the predictive-variance decomposition.
     decomposition_difference = torch.max(
         torch.abs(
             predictive_variance
-            -
-            (
-                aleatoric_variance
-                +
-                epistemic_variance
-            )
+            - (aleatoric_variance + epistemic_variance)
         )
     ).item()
 
-    # -----------------------------------------------------------------
-    # Numerical tolerance for floating-point decomposition.
-    # -----------------------------------------------------------------
-
-    if (
-        decomposition_difference
-        >
-        1.0e-5
-    ):
-
+    if decomposition_difference > 1.0e-5:
         raise RuntimeError(
             "Predictive variance decomposition failed. "
-            f"Maximum difference: "
-            f"{decomposition_difference:.6e}"
+            f"Maximum difference: {decomposition_difference:.6e}"
         )
 
-    # =================================================================
-    # DATA-CONSISTENCY PROJECTION
-    # =================================================================
-
-    # -----------------------------------------------------------------
-    # Reconstructed missing samples come from the model.
-    #
-    # Observed samples are restored exactly from the original
-    # corrupted input.
-    #
-    # Formula:
-    #
-    # reconstruction =
-    #       (1-mask) * model_output
-    #       +
-    #       mask * corrupted
-    # -----------------------------------------------------------------
-
+    # Restore observed data exactly; predict only missing samples.
     reconstruction_batch = (
-        (
-            1.0
-            -
-            mask_batch
-        )
-        *
-        reconstruction_mean
-        +
-        mask_batch
-        *
-        corrupted_batch
+        (1.0 - mask_batch) * reconstruction_mean
+        + mask_batch * corrupted_batch
     )
 
-    # =================================================================
-    # FINAL BATCH SHAPE VALIDATION
-    # =================================================================
-
-    if tuple(
-        reconstruction_batch.shape
-    ) != expected_network_shape:
-
+    if tuple(reconstruction_batch.shape) != expected_network_shape:
         raise RuntimeError(
             "Unexpected final reconstruction shape. "
             f"Expected: {expected_network_shape}; "
-            f"Received: "
-            f"{tuple(reconstruction_batch.shape)}"
+            f"Received: {tuple(reconstruction_batch.shape)}"
         )
-
-    # =================================================================
-    # REMOVE ONLY THE BATCH DIMENSION
-    # =================================================================
-
-    # -----------------------------------------------------------------
-    # (B,C,D,H,W)
-    #        ↓
-    # (C,D,H,W)
-    # -----------------------------------------------------------------
 
     reconstruction = (
-        reconstruction_batch
-        .squeeze(0)
-        .detach()
-        .cpu()
+        reconstruction_batch.squeeze(0).detach().cpu()
     )
 
-    # =================================================================
-    # FINAL OBSERVED-DATA VALIDATION
-    # =================================================================
-
-    preservation_error = (
-        validate_reconstruction(
-            reconstruction,
-            corrupted,
-            mask,
-        )
+    preservation_error = validate_reconstruction(
+        reconstruction,
+        corrupted,
+        mask,
     )
-
-    # =================================================================
-    # COMMON RECONSTRUCTION METRICS
-    # =================================================================
 
     metrics = calculate_metrics(
         reconstruction,
@@ -1599,238 +896,86 @@ def run_proposed_model(
         mask,
     )
 
-    # =================================================================
-    # MISSING-REGION UNCERTAINTY MASK
-    # =================================================================
+    missing_selector = mask_batch == 0
 
-    missing_selector = (
-        mask_batch == 0
-    )
-
-    if not bool(
-        missing_selector.any().item()
-    ):
-
+    if not bool(missing_selector.any().item()):
         raise RuntimeError(
-            "No missing samples available for "
-            "missing-region uncertainty."
+            "No missing samples available for missing-region uncertainty."
         )
 
-    # =================================================================
-    # OVERALL UNCERTAINTY
-    # =================================================================
+    # Overall uncertainty statistics.
+    mean_aleatoric = float(aleatoric_variance.mean().item())
+    mean_epistemic = float(epistemic_variance.mean().item())
+    mean_predictive = float(predictive_variance.mean().item())
+    mean_predictive_std = float(predictive_std.mean().item())
 
-    mean_aleatoric = float(
-        aleatoric_variance
-        .mean()
-        .item()
-    )
-
-    mean_epistemic = float(
-        epistemic_variance
-        .mean()
-        .item()
-    )
-
-    mean_predictive = float(
-        predictive_variance
-        .mean()
-        .item()
-    )
-
-    mean_predictive_std = float(
-        predictive_std
-        .mean()
-        .item()
-    )
-
-    # =================================================================
-    # MISSING-REGION UNCERTAINTY
-    # =================================================================
-
+    # Missing-region uncertainty statistics.
     missing_aleatoric = float(
-        aleatoric_variance[
-            missing_selector
-        ]
-        .mean()
-        .item()
+        aleatoric_variance[missing_selector].mean().item()
     )
-
     missing_epistemic = float(
-        epistemic_variance[
-            missing_selector
-        ]
-        .mean()
-        .item()
+        epistemic_variance[missing_selector].mean().item()
     )
-
     missing_predictive = float(
-        predictive_variance[
-            missing_selector
-        ]
-        .mean()
-        .item()
+        predictive_variance[missing_selector].mean().item()
     )
-
     missing_predictive_std = float(
-        predictive_std[
-            missing_selector
-        ]
-        .mean()
-        .item()
+        predictive_std[missing_selector].mean().item()
     )
-
-    # =================================================================
-    # RESULT RECORD
-    # =================================================================
 
     result = {
-
-        "method":
-            "proposed_physics_informed_3d",
-
-        "geological_mode":
-            GEOLOGICAL_MODE,
-
-        "mask_mode":
-            MASK_MODE,
-
-        "seed":
-            int(SEED),
-
-        "requested_missing_rate":
-            float(MISSING_RATE),
-
-        "cube_depth":
-            int(CUBE_SIZE[0]),
-
-        "cube_height":
-            int(CUBE_SIZE[1]),
-
-        "cube_width":
-            int(CUBE_SIZE[2]),
-
-        "runtime_seconds":
-            float(runtime_seconds),
-
-        "observed_preservation_error":
-            float(preservation_error),
-
-        "MAE":
-            metrics["MAE"],
-
-        "RMSE":
-            metrics["RMSE"],
-
-        "PSNR":
-            metrics["PSNR"],
-
-        "SNR":
-            metrics["SNR"],
-
-        "SSIM":
-            metrics["SSIM"],
-
-        "missing_mae":
-            metrics["missing_mae"],
-
-        "missing_rmse":
-            metrics["missing_rmse"],
-
-        "aleatoric_variance_mean":
-            mean_aleatoric,
-
-        "epistemic_variance_mean":
-            mean_epistemic,
-
-        "predictive_variance_mean":
-            mean_predictive,
-
-        "predictive_std_mean":
-            mean_predictive_std,
-
-        "missing_aleatoric_variance_mean":
-            missing_aleatoric,
-
-        "missing_epistemic_variance_mean":
-            missing_epistemic,
-
-        "missing_predictive_variance_mean":
-            missing_predictive,
-
-        "missing_predictive_std_mean":
-            missing_predictive_std,
-
-        "status":
-            "PASS",
-
-        "error":
-            "",
+        "method": "proposed_physics_informed_3d",
+        "geological_mode": GEOLOGICAL_MODE,
+        "mask_mode": MASK_MODE,
+        "seed": int(SEED),
+        "requested_missing_rate": float(MISSING_RATE),
+        "cube_depth": int(CUBE_SIZE[0]),
+        "cube_height": int(CUBE_SIZE[1]),
+        "cube_width": int(CUBE_SIZE[2]),
+        "runtime_seconds": float(runtime_seconds),
+        "observed_preservation_error": float(preservation_error),
+        "MAE": metrics["MAE"],
+        "RMSE": metrics["RMSE"],
+        "PSNR": metrics["PSNR"],
+        "SNR": metrics["SNR"],
+        "SSIM": metrics["SSIM"],
+        "missing_mae": metrics["missing_mae"],
+        "missing_rmse": metrics["missing_rmse"],
+        "aleatoric_variance_mean": mean_aleatoric,
+        "epistemic_variance_mean": mean_epistemic,
+        "predictive_variance_mean": mean_predictive,
+        "predictive_std_mean": mean_predictive_std,
+        "missing_aleatoric_variance_mean": missing_aleatoric,
+        "missing_epistemic_variance_mean": missing_epistemic,
+        "missing_predictive_variance_mean": missing_predictive,
+        "missing_predictive_std_mean": missing_predictive_std,
+        "status": "PASS",
+        "error": "",
     }
 
-    # =================================================================
-    # CONSOLE RESULTS
-    # =================================================================
+    print(f"MAE          : {result['MAE']:.6f}")
+    print(f"RMSE         : {result['RMSE']:.6f}")
+    print(f"PSNR         : {result['PSNR']:.6f} dB")
+    print(f"SNR          : {result['SNR']:.6f} dB")
+    print(f"SSIM         : {result['SSIM']:.6f}")
+    print(f"Missing MAE  : {result['missing_mae']:.6f}")
+    print(f"Missing RMSE : {result['missing_rmse']:.6f}")
+    print(f"Runtime      : {result['runtime_seconds']:.4f} s")
+    print(f"Aleatoric σ² : {mean_aleatoric:.6e}")
+    print(f"Epistemic σ² : {mean_epistemic:.6e}")
+    print(f"Predictive σ²: {mean_predictive:.6e}")
+    print(f"Predictive σ : {mean_predictive_std:.6e}")
+    print(f"Observed err : {preservation_error:.6e}")
 
-    print(
-        f"MAE          : {result['MAE']:.6f}"
-    )
+    # Release references to large MC tensors as soon as practical.
+    del predictions
+    del reconstruction_samples
+    del log_variance_samples
+    del uncertainty_results
+    del reconstruction_mean
 
-    print(
-        f"RMSE         : {result['RMSE']:.6f}"
-    )
-
-    print(
-        f"PSNR         : {result['PSNR']:.6f} dB"
-    )
-
-    print(
-        f"SNR          : {result['SNR']:.6f} dB"
-    )
-
-    print(
-        f"SSIM         : {result['SSIM']:.6f}"
-    )
-
-    print(
-        f"Missing MAE  : "
-        f"{result['missing_mae']:.6f}"
-    )
-
-    print(
-        f"Missing RMSE : "
-        f"{result['missing_rmse']:.6f}"
-    )
-
-    print(
-        f"Runtime      : "
-        f"{result['runtime_seconds']:.4f} s"
-    )
-
-    print(
-        f"Aleatoric σ² : "
-        f"{result['aleatoric_variance_mean']:.6e}"
-    )
-
-    print(
-        f"Epistemic σ² : "
-        f"{result['epistemic_variance_mean']:.6e}"
-    )
-
-    print(
-        f"Predictive σ²: "
-        f"{result['predictive_variance_mean']:.6e}"
-    )
-
-    print(
-        f"Predictive σ : "
-        f"{result['predictive_std_mean']:.6e}"
-    )
-
-    print(
-        f"Observed err : "
-        f"{result['observed_preservation_error']:.6e}"
-    )
+    if DEVICE.type == "cuda":
+        torch.cuda.empty_cache()
 
     return result
 
@@ -1843,92 +988,36 @@ def build_failed_result(
     method_name: str,
     error: Exception,
 ) -> dict:
-    """
-    Create a standardized failed-result record.
-    """
+    """Create a standardized failed-result record."""
 
     return {
-
-        "method":
-            method_name,
-
-        "geological_mode":
-            GEOLOGICAL_MODE,
-
-        "mask_mode":
-            MASK_MODE,
-
-        "seed":
-            int(SEED),
-
-        "requested_missing_rate":
-            float(MISSING_RATE),
-
-        "cube_depth":
-            int(CUBE_SIZE[0]),
-
-        "cube_height":
-            int(CUBE_SIZE[1]),
-
-        "cube_width":
-            int(CUBE_SIZE[2]),
-
-        "runtime_seconds":
-            np.nan,
-
-        "observed_preservation_error":
-            np.nan,
-
-        "MAE":
-            np.nan,
-
-        "RMSE":
-            np.nan,
-
-        "PSNR":
-            np.nan,
-
-        "SNR":
-            np.nan,
-
-        "SSIM":
-            np.nan,
-
-        "missing_mae":
-            np.nan,
-
-        "missing_rmse":
-            np.nan,
-
-        "aleatoric_variance_mean":
-            np.nan,
-
-        "epistemic_variance_mean":
-            np.nan,
-
-        "predictive_variance_mean":
-            np.nan,
-
-        "predictive_std_mean":
-            np.nan,
-
-        "missing_aleatoric_variance_mean":
-            np.nan,
-
-        "missing_epistemic_variance_mean":
-            np.nan,
-
-        "missing_predictive_variance_mean":
-            np.nan,
-
-        "missing_predictive_std_mean":
-            np.nan,
-
-        "status":
-            "FAILED",
-
-        "error":
-            str(error),
+        "method": method_name,
+        "geological_mode": GEOLOGICAL_MODE,
+        "mask_mode": MASK_MODE,
+        "seed": int(SEED),
+        "requested_missing_rate": float(MISSING_RATE),
+        "cube_depth": int(CUBE_SIZE[0]),
+        "cube_height": int(CUBE_SIZE[1]),
+        "cube_width": int(CUBE_SIZE[2]),
+        "runtime_seconds": np.nan,
+        "observed_preservation_error": np.nan,
+        "MAE": np.nan,
+        "RMSE": np.nan,
+        "PSNR": np.nan,
+        "SNR": np.nan,
+        "SSIM": np.nan,
+        "missing_mae": np.nan,
+        "missing_rmse": np.nan,
+        "aleatoric_variance_mean": np.nan,
+        "epistemic_variance_mean": np.nan,
+        "predictive_variance_mean": np.nan,
+        "predictive_std_mean": np.nan,
+        "missing_aleatoric_variance_mean": np.nan,
+        "missing_epistemic_variance_mean": np.nan,
+        "missing_predictive_variance_mean": np.nan,
+        "missing_predictive_std_mean": np.nan,
+        "status": "FAILED",
+        "error": str(error),
     }
 
 
@@ -1940,12 +1029,9 @@ def write_csv(
     output_file: Path,
     records: list[dict],
 ) -> None:
-    """
-    Write records to CSV.
-    """
+    """Write result records to CSV."""
 
     if not records:
-
         return
 
     output_file.parent.mkdir(
@@ -1953,9 +1039,7 @@ def write_csv(
         exist_ok=True,
     )
 
-    fieldnames = list(
-        records[0].keys()
-    )
+    fieldnames = list(records[0].keys())
 
     with open(
         output_file,
@@ -1963,17 +1047,13 @@ def write_csv(
         newline="",
         encoding="utf-8",
     ) as file:
-
         writer = csv.DictWriter(
             file,
             fieldnames=fieldnames,
         )
 
         writer.writeheader()
-
-        writer.writerows(
-            records
-        )
+        writer.writerows(records)
 
 
 # =====================================================================
@@ -1986,104 +1066,54 @@ def calculate_summary(
     """
     Create the side-by-side summary.
 
-    This script intentionally contains one common test case per
-    method. Therefore n_cases is normally 1.
-
-    The large-sample statistical analysis belongs to the dedicated
-    750-case controlled experiments.
+    This script evaluates one common case per method.
+    Statistical analysis for the 750-case controlled experiment
+    remains in the dedicated controlled-experiment scripts.
     """
 
     summaries = []
 
     for record in records:
-
-        summaries.append(
-            {
-
-                "method":
-                    record["method"],
-
-                "n_cases":
-                    1
-                    if record["status"]
-                    == "PASS"
-                    else 0,
-
-                "MAE_mean":
-                    record["MAE"],
-
-                "RMSE_mean":
-                    record["RMSE"],
-
-                "PSNR_mean":
-                    record["PSNR"],
-
-                "SNR_mean":
-                    record["SNR"],
-
-                "SSIM_mean":
-                    record["SSIM"],
-
-                "missing_mae_mean":
-                    record["missing_mae"],
-
-                "missing_rmse_mean":
-                    record["missing_rmse"],
-
-                "runtime_seconds_mean":
-                    record[
-                        "runtime_seconds"
-                    ],
-
-                "observed_preservation_error_max":
-                    record[
-                        "observed_preservation_error"
-                    ],
-
-                "aleatoric_variance_mean":
-                    record[
-                        "aleatoric_variance_mean"
-                    ],
-
-                "epistemic_variance_mean":
-                    record[
-                        "epistemic_variance_mean"
-                    ],
-
-                "predictive_variance_mean":
-                    record[
-                        "predictive_variance_mean"
-                    ],
-
-                "predictive_std_mean":
-                    record[
-                        "predictive_std_mean"
-                    ],
-
-                "missing_aleatoric_variance_mean":
-                    record[
-                        "missing_aleatoric_variance_mean"
-                    ],
-
-                "missing_epistemic_variance_mean":
-                    record[
-                        "missing_epistemic_variance_mean"
-                    ],
-
-                "missing_predictive_variance_mean":
-                    record[
-                        "missing_predictive_variance_mean"
-                    ],
-
-                "missing_predictive_std_mean":
-                    record[
-                        "missing_predictive_std_mean"
-                    ],
-
-                "status":
-                    record["status"],
-            }
-        )
+        summaries.append({
+            "method": record["method"],
+            "n_cases": 1 if record["status"] == "PASS" else 0,
+            "MAE_mean": record["MAE"],
+            "RMSE_mean": record["RMSE"],
+            "PSNR_mean": record["PSNR"],
+            "SNR_mean": record["SNR"],
+            "SSIM_mean": record["SSIM"],
+            "missing_mae_mean": record["missing_mae"],
+            "missing_rmse_mean": record["missing_rmse"],
+            "runtime_seconds_mean": record["runtime_seconds"],
+            "observed_preservation_error_max": (
+                record["observed_preservation_error"]
+            ),
+            "aleatoric_variance_mean": (
+                record["aleatoric_variance_mean"]
+            ),
+            "epistemic_variance_mean": (
+                record["epistemic_variance_mean"]
+            ),
+            "predictive_variance_mean": (
+                record["predictive_variance_mean"]
+            ),
+            "predictive_std_mean": (
+                record["predictive_std_mean"]
+            ),
+            "missing_aleatoric_variance_mean": (
+                record["missing_aleatoric_variance_mean"]
+            ),
+            "missing_epistemic_variance_mean": (
+                record["missing_epistemic_variance_mean"]
+            ),
+            "missing_predictive_variance_mean": (
+                record["missing_predictive_variance_mean"]
+            ),
+            "missing_predictive_std_mean": (
+                record["missing_predictive_std_mean"]
+            ),
+            "status": record["status"],
+        })
 
     return summaries
 
@@ -2093,97 +1123,45 @@ def calculate_summary(
 # =====================================================================
 
 def main() -> None:
-    """
-    Execute the common seven-method comparison.
-    """
+    """Execute the common seven-method comparison."""
 
     print()
     print("=" * 78)
-    print(
-        "COMMON SEVEN-METHOD RECONSTRUCTION COMPARISON"
-    )
+    print("COMMON SEVEN-METHOD RECONSTRUCTION COMPARISON")
     print("=" * 78)
 
-    # =================================================================
-    # CONFIGURATION DISPLAY
-    # =================================================================
+    print(f"\nCube size          : {CUBE_SIZE}")
+    print(f"Number of samples  : {NUM_SAMPLES}")
+    print(f"Geological mode    : {GEOLOGICAL_MODE}")
+    print(f"Mask mode          : {MASK_MODE}")
+    print(f"Missing rate       : {MISSING_RATE:.0%}")
+    print(f"Seed               : {SEED}")
+    print(f"Configured device  : {CONFIG_DEVICE}")
+    print(f"Resolved device    : {DEVICE}")
+    print(f"Attention          : {USE_ATTENTION}")
+    print(f"Residual           : {USE_RESIDUAL}")
+    print(f"Uncertainty        : {USE_UNCERTAINTY}")
+    print(f"Acoustic time steps: {config.ACOUSTIC_TIME_STEPS}")
+    print(f"MC samples         : {MC_SAMPLES}")
 
-    print()
+    print("\nThis script evaluates ONE common test case.")
     print(
-        f"Cube size          : {CUBE_SIZE}"
+        "The 750-case controlled experiments are handled separately."
     )
 
-    print(
-        f"Number of samples  : {NUM_SAMPLES}"
-    )
+    # -----------------------------------------------------------------
+    # Reproducibility
+    # -----------------------------------------------------------------
 
-    print(
-        f"Geological mode    : {GEOLOGICAL_MODE}"
-    )
+    set_seed(SEED)
 
-    print(
-        f"Mask mode          : {MASK_MODE}"
-    )
-
-    print(
-        f"Missing rate       : {MISSING_RATE:.0%}"
-    )
-
-    print(
-        f"Seed               : {SEED}"
-    )
-
-    print(
-        f"Configured device  : {CONFIG_DEVICE}"
-    )
-
-    print(
-        f"Resolved device    : {DEVICE}"
-    )
-
-    print(
-        f"Attention          : {USE_ATTENTION}"
-    )
-
-    print(
-        f"Residual           : {USE_RESIDUAL}"
-    )
-
-    print(
-        f"Uncertainty        : {USE_UNCERTAINTY}"
-    )
-
-    print(
-        f"MC samples         : {MC_SAMPLES}"
-    )
-
-    print()
-    print(
-        "This script evaluates ONE common test case."
-    )
-
-    print(
-        "The 750-case controlled experiments are "
-        "handled separately."
-    )
-
-    # =================================================================
-    # REPRODUCIBILITY
-    # =================================================================
-
-    set_seed(
-        SEED
-    )
-
-    # =================================================================
-    # CREATE COMMON DATASET
-    # =================================================================
+    # -----------------------------------------------------------------
+    # Create the common test dataset
+    # -----------------------------------------------------------------
 
     print()
     print("=" * 78)
-    print(
-        "CREATING COMMON TEST SAMPLE"
-    )
+    print("CREATING COMMON TEST SAMPLE")
     print("=" * 78)
 
     dataset = SyntheticSeismicDataset(
@@ -2204,35 +1182,19 @@ def main() -> None:
         actual_geological_mode,
     ) = dataset[0]
 
-    # =================================================================
-    # VALIDATE DATASET METADATA
-    # =================================================================
-
-    if (
-        actual_geological_mode
-        != GEOLOGICAL_MODE
-    ):
-
+    if actual_geological_mode != GEOLOGICAL_MODE:
         raise RuntimeError(
             "Geological mode mismatch. "
             f"Requested: {GEOLOGICAL_MODE}; "
             f"Received: {actual_geological_mode}"
         )
 
-    if (
-        actual_mask_mode
-        != MASK_MODE
-    ):
-
+    if actual_mask_mode != MASK_MODE:
         raise RuntimeError(
             "Mask mode mismatch. "
             f"Requested: {MASK_MODE}; "
             f"Received: {actual_mask_mode}"
         )
-
-    # =================================================================
-    # VALIDATE COMMON INPUT
-    # =================================================================
 
     validate_common_input(
         corrupted,
@@ -2241,269 +1203,151 @@ def main() -> None:
         velocity,
     )
 
-    # =================================================================
-    # INPUT DATA CONSISTENCY
-    # =================================================================
+    # -----------------------------------------------------------------
+    # Verify that corrupted input contains only observed target values
+    # -----------------------------------------------------------------
 
-    expected_corrupted = (
-        target
-        *
-        mask
-    )
+    expected_corrupted = target * mask
 
     input_difference = torch.max(
-        torch.abs(
-            corrupted
-            -
-            expected_corrupted
-        )
+        torch.abs(corrupted - expected_corrupted)
     ).item()
 
-    if (
-        input_difference
-        >
-        OBSERVED_PRESERVATION_TOLERANCE
-    ):
-
+    if input_difference > OBSERVED_PRESERVATION_TOLERANCE:
         raise RuntimeError(
             "Common input consistency failed. "
-            f"Maximum difference: "
-            f"{input_difference:.6e}"
+            f"Maximum difference: {input_difference:.6e}"
         )
 
-    # =================================================================
-    # SAMPLE STATISTICS
-    # =================================================================
+    # -----------------------------------------------------------------
+    # Sample statistics
+    # -----------------------------------------------------------------
 
-    observed_samples = int(
-        (mask == 1)
-        .sum()
-        .item()
-    )
+    observed_samples = int((mask == 1).sum().item())
+    missing_samples = int((mask == 0).sum().item())
+    total_samples = observed_samples + missing_samples
 
-    missing_samples = int(
-        (mask == 0)
-        .sum()
-        .item()
-    )
+    measured_missing_rate = missing_samples / total_samples
 
-    total_samples = (
-        observed_samples
-        +
-        missing_samples
-    )
+    print(f"\nObserved samples : {observed_samples}")
+    print(f"Missing samples  : {missing_samples}")
+    print(f"Measured missing : {measured_missing_rate:.6f}")
 
-    measured_missing_rate = (
-        missing_samples
-        /
-        total_samples
-    )
+    # -----------------------------------------------------------------
+    # Load the proposed model before running the methods
+    # -----------------------------------------------------------------
 
-    print()
-    print(
-        f"Observed samples  : {observed_samples}"
-    )
-
-    print(
-        f"Missing samples   : {missing_samples}"
-    )
-
-    print(
-        f"Measured missing  : "
-        f"{measured_missing_rate:.6f}"
-    )
-
-    # =================================================================
-    # LOAD FROZEN PROPOSED MODEL
-    # =================================================================
-
-    proposed_model = (
-        load_proposed_model()
-    )
-
-    # =================================================================
-    # RESULT STORAGE
-    # =================================================================
+    proposed_model = load_proposed_model()
 
     records = []
 
-    # =================================================================
-    # CLASSICAL BASELINES
-    # =================================================================
+    # -----------------------------------------------------------------
+    # Six classical methods
+    # -----------------------------------------------------------------
 
     classical_methods = [
-
         (
             "nearest_neighbor",
             nearest_neighbor_reconstruction,
         ),
-
         (
             "linear_interpolation",
             linear_interpolation_reconstruction,
         ),
-
         (
             "fx_prediction",
             fx_prediction_reconstruction,
         ),
-
         (
             "compressive_sensing",
             compressive_sensing_reconstruction,
         ),
-
         (
             "curvelet_pocs",
             curvelet_pocs_reconstruction,
         ),
-
         (
             "dictionary_learning",
             dictionary_learning_reconstruction,
         ),
     ]
 
-    # =================================================================
-    # RUN SIX CLASSICAL METHODS
-    # =================================================================
-
-    for (
-        method_name,
-        reconstruction_function,
-    ) in classical_methods:
-
+    for method_name, reconstruction_function in classical_methods:
         try:
-
-            result = (
-                run_classical_method(
-                    method_name=
-                        method_name,
-                    reconstruction_function=
-                        reconstruction_function,
-                    corrupted=
-                        corrupted,
-                    mask=
-                        mask,
-                    target=
-                        target,
-                )
+            result = run_classical_method(
+                method_name=method_name,
+                reconstruction_function=reconstruction_function,
+                corrupted=corrupted,
+                mask=mask,
+                target=target,
             )
-
         except Exception as error:
+            print(f"\n{method_name} FAILED")
+            print(f"Error: {error}")
 
-            print()
-            print(
-                f"{method_name} FAILED"
-            )
-
-            print(
-                f"Error: {error}"
-            )
-
-            result = (
-                build_failed_result(
-                    method_name,
-                    error,
-                )
-            )
-
-        records.append(
-            result
-        )
-
-    # =================================================================
-    # RUN PROPOSED MODEL
-    # =================================================================
-
-    try:
-
-        result = (
-            run_proposed_model(
-                model=
-                    proposed_model,
-                corrupted=
-                    corrupted,
-                mask=
-                    mask,
-                target=
-                    target,
-            )
-        )
-
-    except Exception as error:
-
-        print()
-        print(
-            "proposed_physics_informed_3d FAILED"
-        )
-
-        print(
-            f"Error: {error}"
-        )
-
-        result = (
-            build_failed_result(
-                "proposed_physics_informed_3d",
+            result = build_failed_result(
+                method_name,
                 error,
             )
+
+        records.append(result)
+
+    # -----------------------------------------------------------------
+    # Proposed acoustic model
+    # -----------------------------------------------------------------
+
+    try:
+        result = run_proposed_model(
+            model=proposed_model,
+            corrupted=corrupted,
+            mask=mask,
+            target=target,
+        )
+    except Exception as error:
+        print("\nproposed_physics_informed_3d FAILED")
+        print(f"Error: {error}")
+
+        result = build_failed_result(
+            "proposed_physics_informed_3d",
+            error,
         )
 
-    records.append(
-        result
-    )
+    records.append(result)
 
-    # =================================================================
-    # WRITE RAW RESULTS
-    # =================================================================
+    # -----------------------------------------------------------------
+    # Save raw results and summary
+    # -----------------------------------------------------------------
 
     write_csv(
         RESULTS_FILE,
         records,
     )
 
-    # =================================================================
-    # WRITE SUMMARY
-    # =================================================================
-
-    summaries = (
-        calculate_summary(
-            records
-        )
-    )
+    summaries = calculate_summary(records)
 
     write_csv(
         SUMMARY_FILE,
         summaries,
     )
 
-    # =================================================================
-    # FINAL COUNTS
-    # =================================================================
-
     successful = sum(
-        record["status"]
-        == "PASS"
+        record["status"] == "PASS"
         for record in records
     )
 
     failed = sum(
-        record["status"]
-        == "FAILED"
+        record["status"] == "FAILED"
         for record in records
     )
 
-    # =================================================================
-    # CONSOLE COMPARISON TABLE
-    # =================================================================
+    # -----------------------------------------------------------------
+    # Console comparison table
+    # -----------------------------------------------------------------
 
     print()
     print("=" * 78)
-    print(
-        "COMMON RECONSTRUCTION METRICS"
-    )
+    print("COMMON RECONSTRUCTION METRICS")
     print("=" * 78)
-
     print()
 
     print(
@@ -2515,17 +1359,10 @@ def main() -> None:
         f"{'SSIM':>10}"
     )
 
-    print(
-        "-" * 86
-    )
+    print("-" * 86)
 
     for record in records:
-
-        if (
-            record["status"]
-            != "PASS"
-        ):
-
+        if record["status"] != "PASS":
             continue
 
         print(
@@ -2537,81 +1374,33 @@ def main() -> None:
             f"{record['SSIM']:>10.6f}"
         )
 
-    # =================================================================
-    # OUTPUT SUMMARY
-    # =================================================================
+    # -----------------------------------------------------------------
+    # Final output
+    # -----------------------------------------------------------------
 
     print()
     print("=" * 78)
-    print(
-        "SEVEN-METHOD COMPARISON COMPLETE"
-    )
+    print("SEVEN-METHOD COMPARISON COMPLETE")
     print("=" * 78)
 
-    print()
-    print(
-        f"Methods evaluated : {len(records)}"
-    )
+    print(f"\nMethods evaluated : {len(records)}")
+    print(f"Successful        : {successful}")
+    print(f"Failed            : {failed}")
 
-    print(
-        f"Successful        : {successful}"
-    )
-
-    print(
-        f"Failed            : {failed}"
-    )
-
-    print()
-    print(
-        "Raw results:"
-    )
-
-    print(
-        RESULTS_FILE
-    )
-
-    print()
-    print(
-        "Summary results:"
-    )
-
-    print(
-        SUMMARY_FILE
-    )
-
-    # =================================================================
-    # FINAL STATUS
-    # =================================================================
+    print(f"\nRaw results:\n{RESULTS_FILE}")
+    print(f"\nSummary results:\n{SUMMARY_FILE}")
 
     if failed == 0:
-
-        print()
+        print("\nOVERALL STATUS: PASS")
         print(
-            "OVERALL STATUS: PASS"
+            "All seven methods completed successfully using the "
+            "same corrupted cube and observation mask."
         )
-
-        print()
-        print(
-            "All seven methods completed successfully "
-            "using the same corrupted cube and "
-            "observation mask."
-        )
-
     else:
-
-        print()
+        print("\nOVERALL STATUS: FAIL")
         print(
-            "OVERALL STATUS: FAIL"
-        )
-
-        print()
-        print(
-            "One or more methods failed."
-        )
-
-        print(
-            "Inspect the 'error' column in "
-            "baseline_comparison.csv."
+            "One or more methods failed. Inspect the error column "
+            "in baseline_comparison.csv."
         )
 
     print()
@@ -2622,5 +1411,4 @@ def main() -> None:
 # =====================================================================
 
 if __name__ == "__main__":
-
     main()

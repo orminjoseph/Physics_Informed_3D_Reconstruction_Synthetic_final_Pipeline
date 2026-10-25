@@ -1,81 +1,38 @@
-"""
-=========================================================
-Network3D
-=========================================================
 
-Physics-Informed 3D Encoder–Decoder Framework
+"""
+====================================================================
+Network3D
+====================================================================
+
+Physics-Informed 3D Encoder-Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction
 
-Architecture
-------------
+ACOUSTIC-WAVE VERSION
+--------------------
+This version replaces the old Eikonal/travel-time head with a
+pressure-wavefield head.
 
-    Input Seismic Cube
-          |
-          v
-      3D Encoder
-          |
-          +---- x1
-          +---- x2
-          +---- x3
-          +---- x4
-          +---- x5
-                    |
-                    v
-              3D Bottleneck
-                    |
-                    v
-              3D Decoder
-                    |
-                    v
-             Decoder Features
-                    |
-          +---------+---------+
-          |         |         |
-          v         v         v
-    Reconstruction  Travel-   Aleatoric
-        Head        Time Head  Uncertainty
-                                  Head
-          |           |             |
-          v           v             v
-      Seismic       Positive     log(sigma_a^2)
-    Reconstruction Travel Time
+Expected forward outputs:
+    reconstructed_cube:
+        [B, out_channels, D, H, W]
 
-Predictive uncertainty is estimated during inference:
+    pressure_wavefield:
+        [B, 1, T, D, H, W]
 
-    Predictive Variance
-        =
-    Aleatoric Variance
-        +
-    Epistemic Variance
+    log_variance:
+        [B, out_channels, D, H, W]
 
-where:
+IMPORTANT SCIENTIFIC NOTE
+-------------------------
+The pressure head predicts a time-dependent pressure field from
+the encoded seismic features. Its physical validity must be enforced
+by the acoustic-wave-equation loss, which also requires a compatible
+velocity model, source term, and discretization.
 
-    Aleatoric Variance
-        = mean(exp(log_variance_samples))
-
-    Epistemic Variance
-        = variance of MC-Dropout reconstruction samples.
-
-Tensor convention
------------------
-
-    Input:
-        [B, C, D, H, W]
-
-    Outputs:
-        Reconstruction:
-            [B, 1, D, H, W]
-
-        Travel time:
-            [B, 1, D, H, W]
-
-        Log variance:
-            [B, 1, D, H, W]
-
-=========================================================
-Author:
-Ormin Joseph
-=========================================================
+This network does not solve the acoustic wave equation by itself.
+====================================================================
+Author: Ormin Joseph
+====================================================================
 """
 
 import torch
@@ -85,12 +42,10 @@ from models.encoder import Encoder3D
 from models.bottleneck import Bottleneck3D
 from models.decoder import Decoder3D
 
-from utils.config import TRAVEL_TIME_SCALE
-
 
 class Network3D(nn.Module):
     """
-    Complete Physics-Informed 3D Encoder–Decoder Network.
+    3D encoder-decoder network for seismic reconstruction.
 
     Parameters
     ----------
@@ -101,22 +56,29 @@ class Network3D(nn.Module):
         Number of reconstructed seismic channels.
 
     use_attention : bool
-        Enables attention gates in the decoder.
+        Enable attention gates in the decoder.
 
     use_residual : bool
-        Enables residual connections.
+        Enable residual connections where supported.
 
     use_uncertainty : bool
-        Enables the aleatoric uncertainty head.
+        Enable the aleatoric uncertainty head.
+
+    pressure_time_steps : int
+        Number of temporal samples predicted by the pressure head.
 
     Notes
     -----
-    The network always returns three outputs so that the
-    training and inference interfaces remain consistent:
+    The forward method returns three outputs:
 
-        reconstruction
-        travel_time
-        log_variance
+        reconstruction, pressure_wavefield, log_variance
+
+    The pressure-wavefield head is separate from the reconstruction
+    and uncertainty heads.
+
+    The temporal dimension of pressure_wavefield is not assumed to
+    equal any spatial dimension of the input. It is explicitly
+    controlled by pressure_time_steps.
     """
 
     def __init__(
@@ -126,504 +88,319 @@ class Network3D(nn.Module):
         use_attention=True,
         use_residual=True,
         use_uncertainty=True,
+        pressure_time_steps=64,
     ):
-
         super().__init__()
 
-        # =================================================
+        # ----------------------------------------------------------
         # Validate constructor arguments
-        # =================================================
+        # ----------------------------------------------------------
 
-        if not isinstance(in_channels, int):
-            raise TypeError(
-                "in_channels must be an integer."
-            )
+        if not isinstance(in_channels, int) or isinstance(
+            in_channels, bool
+        ):
+            raise TypeError("in_channels must be an integer.")
 
         if in_channels <= 0:
-            raise ValueError(
-                "in_channels must be greater than zero."
-            )
+            raise ValueError("in_channels must be greater than zero.")
 
-        if not isinstance(out_channels, int):
-            raise TypeError(
-                "out_channels must be an integer."
-            )
+        if not isinstance(out_channels, int) or isinstance(
+            out_channels, bool
+        ):
+            raise TypeError("out_channels must be an integer.")
 
         if out_channels <= 0:
-            raise ValueError(
-                "out_channels must be greater than zero."
-            )
+            raise ValueError("out_channels must be greater than zero.")
 
         if not isinstance(use_attention, bool):
-            raise TypeError(
-                "use_attention must be a boolean."
-            )
+            raise TypeError("use_attention must be a boolean.")
 
         if not isinstance(use_residual, bool):
-            raise TypeError(
-                "use_residual must be a boolean."
-            )
+            raise TypeError("use_residual must be a boolean.")
 
         if not isinstance(use_uncertainty, bool):
-            raise TypeError(
-                "use_uncertainty must be a boolean."
-            )
+            raise TypeError("use_uncertainty must be a boolean.")
 
-        # =================================================
-        # Validate travel-time scaling
-        # =================================================
-
-        if not isinstance(
-            TRAVEL_TIME_SCALE,
-            (int, float)
+        if not isinstance(pressure_time_steps, int) or isinstance(
+            pressure_time_steps, bool
         ):
             raise TypeError(
-                "TRAVEL_TIME_SCALE must be numeric."
+                "pressure_time_steps must be an integer."
             )
 
-        if TRAVEL_TIME_SCALE <= 0:
+        if pressure_time_steps < 3:
             raise ValueError(
-                "TRAVEL_TIME_SCALE must be greater than zero."
+                "pressure_time_steps must be at least 3 for "
+                "second-order temporal differentiation."
             )
-
-        # =================================================
-        # Store configuration
-        # =================================================
 
         self.in_channels = in_channels
         self.out_channels = out_channels
-
         self.use_attention = use_attention
         self.use_residual = use_residual
         self.use_uncertainty = use_uncertainty
+        self.pressure_time_steps = pressure_time_steps
 
-        # =================================================
-        # 3D ENCODER
-        # =================================================
-        #
-        # IMPORTANT:
-        # Encoder3D does NOT accept use_attention.
-        #
-        # Attention is handled inside the decoder through
-        # UpBlock3D.
-        #
-        # The encoder returns:
-        #
-        #     x1, x2, x3, x4, x5
-        #
-        # =================================================
+        # ----------------------------------------------------------
+        # 3D encoder
+        # ----------------------------------------------------------
 
         self.encoder = Encoder3D(
             in_channels=in_channels,
-            use_residual=use_residual
+            use_residual=use_residual,
         )
 
-        # =================================================
-        # 3D BOTTLENECK
-        # =================================================
+        # ----------------------------------------------------------
+        # 3D bottleneck
         #
-        # The encoder's deepest feature x5 contains
-        # 512 channels.
-        #
-        # Bottleneck3D therefore operates on 512 channels.
-        #
-        # dropout_probability defaults to 0.20 in the
-        # existing Bottleneck3D implementation.
-        #
-        # =================================================
+        # This assumes the existing encoder's deepest feature map
+        # has 512 channels, as in the supplied network.
+        # ----------------------------------------------------------
 
         self.bottleneck = Bottleneck3D(
             channels=512,
-            use_residual=use_residual
+            use_residual=use_residual,
         )
 
-        # =================================================
-        # 3D DECODER
-        # =================================================
-        #
-        # Decoder3D expects:
-        #
-        #     x1
-        #     x2
-        #     x3
-        #     x4
-        #     bottleneck_output
-        #
-        # Attention and residual settings are handled
-        # internally by the decoder's UpBlock3D modules.
-        #
-        # =================================================
+        # ----------------------------------------------------------
+        # 3D decoder
+        # ----------------------------------------------------------
 
         self.decoder = Decoder3D(
             use_attention=use_attention,
-            use_residual=use_residual
+            use_residual=use_residual,
         )
 
-        # =================================================
-        # RECONSTRUCTION HEAD
-        # =================================================
-        #
-        # Decoder output:
-        #
-        #     [B, 32, D, H, W]
-        #
-        # A 1x1x1 convolution maps these features to
-        # the reconstructed seismic channel.
-        #
-        # No sigmoid or tanh activation is used because
-        # seismic amplitudes are signed.
-        #
-        # =================================================
+        # Decoder feature channels are assumed to be 32, consistent
+        # with the supplied network implementation.
+        decoder_channels = 32
+
+        # ----------------------------------------------------------
+        # Reconstruction head
+        # ----------------------------------------------------------
+        # No sigmoid/tanh: seismic amplitudes can be signed.
 
         self.reconstruction_head = nn.Conv3d(
-            in_channels=32,
+            in_channels=decoder_channels,
             out_channels=out_channels,
             kernel_size=1,
-            stride=1,
-            padding=0
         )
 
-        # =================================================
-        # TRAVEL-TIME HEAD
-        # =================================================
+        # ----------------------------------------------------------
+        # Pressure-wavefield head
+        # ----------------------------------------------------------
+        # Predicts pressure values at each requested time step.
         #
-        # Produces a scalar travel-time field at each voxel.
+        # Output before reshaping:
+        #     [B, pressure_time_steps, D, H, W]
         #
-        # Softplus is applied so that:
+        # Final output:
+        #     [B, 1, T, D, H, W]
         #
-        #     T(x,y,z) > 0
-        #
-        # =================================================
+        # The output channel represents scalar acoustic pressure.
+        # No positivity activation is applied because pressure
+        # perturbations can be positive or negative.
+        # ----------------------------------------------------------
 
-        self.travel_time_head = nn.Conv3d(
-            in_channels=32,
-            out_channels=1,
+        self.pressure_wavefield_head = nn.Conv3d(
+            in_channels=decoder_channels,
+            out_channels=pressure_time_steps,
             kernel_size=1,
-            stride=1,
-            padding=0
         )
-
-        # Small initialization helps avoid excessively
-        # large initial physics gradients.
 
         nn.init.normal_(
-            self.travel_time_head.weight,
+            self.pressure_wavefield_head.weight,
             mean=0.0,
-            std=1e-3
+            std=1e-3,
         )
+        nn.init.zeros_(self.pressure_wavefield_head.bias)
 
-        nn.init.zeros_(
-            self.travel_time_head.bias
-        )
-
-        # Positive travel-time activation.
-
-        self.travel_time_activation = nn.Softplus(
-            beta=1.0,
-            threshold=20.0
-        )
-
-        # =================================================
-        # ALEATORIC UNCERTAINTY HEAD
-        # =================================================
-        #
-        # The head predicts:
-        #
-        #     log(sigma_a^2)
-        #
-        # rather than sigma_a^2 directly.
-        #
-        # The exponential transformation is performed in
-        # the heteroscedastic uncertainty loss/evaluation.
-        #
-        # No activation is applied here.
-        #
-        # =================================================
+        # ----------------------------------------------------------
+        # Aleatoric uncertainty head
+        # ----------------------------------------------------------
+        # Predicts log(sigma_a^2) for each reconstructed voxel.
+        # The exponential is applied by the uncertainty loss or
+        # uncertainty evaluation code, not in this head.
+        # ----------------------------------------------------------
 
         self.uncertainty_head = nn.Conv3d(
-            in_channels=32,
-            out_channels=1,
+            in_channels=decoder_channels,
+            out_channels=out_channels,
             kernel_size=1,
-            stride=1,
-            padding=0
         )
 
-        # =================================================
-        # UNCERTAINTY HEAD INITIALIZATION
-        # =================================================
-        #
-        # Start with:
-        #
-        #     log(sigma_a^2) = 0
-        #
-        # Therefore:
-        #
-        #     sigma_a^2 = exp(0) = 1
-        #
-        # This gives a neutral deterministic initial
-        # uncertainty state.
-        #
-        # It does NOT impose a fixed final uncertainty.
-        # The uncertainty is learned during training.
-        #
-        # =================================================
+        # Start at log variance = 0, corresponding to variance = 1.
+        nn.init.zeros_(self.uncertainty_head.weight)
+        nn.init.zeros_(self.uncertainty_head.bias)
 
-        nn.init.zeros_(
-            self.uncertainty_head.weight
-        )
-
-        nn.init.zeros_(
-            self.uncertainty_head.bias
-        )
-
-    # =====================================================
-    # FORWARD PASS
-    # =====================================================
-
-    def forward(
-        self,
-        x: torch.Tensor
-    ):
+    def forward(self, x):
         """
-        Perform a forward pass through the network.
-
         Parameters
         ----------
         x : torch.Tensor
-            Input seismic volume.
-
-            Shape:
-
-                [B, C, D, H, W]
+            Input seismic cube with shape [B, C, D, H, W].
 
         Returns
         -------
         reconstructed_cube : torch.Tensor
-            Reconstructed seismic volume.
+            Shape [B, out_channels, D, H, W].
 
-        travel_time : torch.Tensor
-            Positive travel-time field.
+        pressure_wavefield : torch.Tensor
+            Shape [B, 1, T, D, H, W].
 
         log_variance : torch.Tensor
-            Log aleatoric variance.
+            Shape [B, out_channels, D, H, W].
         """
 
-        # =================================================
+        # ----------------------------------------------------------
         # Validate input
-        # =================================================
+        # ----------------------------------------------------------
 
         if not isinstance(x, torch.Tensor):
-            raise TypeError(
-                "Network input must be a torch.Tensor."
-            )
+            raise TypeError("Network input must be a torch.Tensor.")
 
         if x.ndim != 5:
             raise ValueError(
-                "Network input must have shape "
-                "[B, C, D, H, W]. "
-                f"Received: {tuple(x.shape)}"
+                "Network input must have shape [B, C, D, H, W]. "
+                f"Received {tuple(x.shape)}."
             )
+
+        if x.shape[0] < 1:
+            raise ValueError("Input batch size must be positive.")
+
+        if x.shape[1] != self.in_channels:
+            raise ValueError(
+                f"Expected {self.in_channels} input channel(s), "
+                f"but received {x.shape[1]}."
+            )
+
+        if min(x.shape[2:]) < 1:
+            raise ValueError("Spatial dimensions must be positive.")
 
         if not torch.isfinite(x).all():
-            raise ValueError(
-                "Network input contains NaN or Inf values."
-            )
+            raise ValueError("Network input contains NaN or Inf.")
 
-        # =================================================
-        # ENCODER
-        # =================================================
-        #
-        # Encoder3D returns:
-        #
-        #     x1
-        #     x2
-        #     x3
-        #     x4
-        #     x5
-        #
-        # x5 is the deepest feature representation.
-        #
-        # =================================================
+        # ----------------------------------------------------------
+        # Encoder
+        # ----------------------------------------------------------
 
-        (
-            x1,
-            x2,
-            x3,
-            x4,
-            x5
-        ) = self.encoder(x)
+        x1, x2, x3, x4, x5 = self.encoder(x)
 
-        # =================================================
-        # BOTTLENECK
-        # =================================================
+        # ----------------------------------------------------------
+        # Bottleneck
+        # ----------------------------------------------------------
 
-        bottleneck_output = self.bottleneck(
-            x5
-        )
+        bottleneck_output = self.bottleneck(x5)
 
-        # =================================================
-        # DECODER
-        # =================================================
-        #
-        # The decoder receives the required skip
-        # connections explicitly.
-        #
-        # =================================================
+        # ----------------------------------------------------------
+        # Decoder
+        # ----------------------------------------------------------
 
         decoder_output = self.decoder(
             x1,
             x2,
             x3,
             x4,
-            bottleneck_output
+            bottleneck_output,
         )
 
-        # =================================================
-        # RECONSTRUCTION
-        # =================================================
+        # ----------------------------------------------------------
+        # Reconstruction
+        # ----------------------------------------------------------
 
-        reconstructed_cube = (
-            self.reconstruction_head(
-                decoder_output
-            )
+        reconstructed_cube = self.reconstruction_head(
+            decoder_output
         )
 
-        # =================================================
-        # TRAVEL-TIME FIELD
-        # =================================================
+        # ----------------------------------------------------------
+        # Time-dependent pressure field
+        # ----------------------------------------------------------
 
-        raw_travel_time = (
-            self.travel_time_head(
-                decoder_output
-            )
+        pressure_sequence = self.pressure_wavefield_head(
+            decoder_output
         )
 
-        # Enforce positivity.
+        batch_size, _, depth, height, width = pressure_sequence.shape
 
-        normalized_travel_time = (
-            self.travel_time_activation(
-                raw_travel_time
-            )
+        pressure_wavefield = pressure_sequence.reshape(
+            batch_size,
+            1,
+            self.pressure_time_steps,
+            depth,
+            height,
+            width,
         )
 
-        # Apply configured travel-time scale.
-
-        travel_time = (
-            TRAVEL_TIME_SCALE
-            * normalized_travel_time
-        )
-
-        # =================================================
-        # ALEATORIC UNCERTAINTY
-        # =================================================
+        # ----------------------------------------------------------
+        # Aleatoric uncertainty
+        # ----------------------------------------------------------
 
         if self.use_uncertainty:
-
-            # Predict log(sigma_a^2).
-
-            log_variance = (
-                self.uncertainty_head(
-                    decoder_output
-                )
-            )
-
+            log_variance = self.uncertainty_head(decoder_output)
         else:
+            log_variance = torch.zeros_like(reconstructed_cube)
 
-            # Preserve the three-output interface even
-            # when uncertainty is disabled.
+        # ----------------------------------------------------------
+        # Validate output shapes
+        # ----------------------------------------------------------
 
-            log_variance = torch.zeros_like(
-                reconstructed_cube
-            )
-
-        # =================================================
-        # OUTPUT VALIDATION
-        # =================================================
-
-        reconstruction_shape = (
-            reconstructed_cube.shape
+        expected_reconstruction_shape = (
+            x.shape[0],
+            self.out_channels,
+            *x.shape[2:],
         )
 
-        # -------------------------------------------------
-        # Travel-time shape
-        # -------------------------------------------------
-
-        if travel_time.shape != reconstruction_shape:
-
+        if tuple(reconstructed_cube.shape) != (
+            expected_reconstruction_shape
+        ):
             raise RuntimeError(
-                "Travel-time output shape does not match "
-                "the reconstruction output shape.\n"
-                f"Reconstruction: "
-                f"{tuple(reconstruction_shape)}\n"
-                f"Travel time: "
-                f"{tuple(travel_time.shape)}"
+                "Unexpected reconstruction shape. "
+                f"Expected {expected_reconstruction_shape}; "
+                f"received {tuple(reconstructed_cube.shape)}."
             )
 
-        # -------------------------------------------------
-        # Log-variance shape
-        # -------------------------------------------------
+        expected_pressure_shape = (
+            x.shape[0],
+            1,
+            self.pressure_time_steps,
+            *x.shape[2:],
+        )
 
-        if log_variance.shape != reconstruction_shape:
-
+        if tuple(pressure_wavefield.shape) != expected_pressure_shape:
             raise RuntimeError(
-                "Log-variance output shape does not match "
-                "the reconstruction output shape.\n"
-                f"Reconstruction: "
-                f"{tuple(reconstruction_shape)}\n"
-                f"Log variance: "
-                f"{tuple(log_variance.shape)}"
+                "Unexpected pressure-wavefield shape. "
+                f"Expected {expected_pressure_shape}; "
+                f"received {tuple(pressure_wavefield.shape)}."
             )
 
-        # -------------------------------------------------
-        # Reconstruction finite check
-        # -------------------------------------------------
-
-        if not torch.isfinite(
-            reconstructed_cube
-        ).all():
-
+        if log_variance.shape != reconstructed_cube.shape:
             raise RuntimeError(
-                "Reconstruction output contains "
-                "NaN or Inf values."
+                "Log-variance shape must match reconstruction shape. "
+                f"Received {tuple(log_variance.shape)} versus "
+                f"{tuple(reconstructed_cube.shape)}."
             )
 
-        # -------------------------------------------------
-        # Travel-time finite check
-        # -------------------------------------------------
+        # ----------------------------------------------------------
+        # Validate finite outputs
+        # ----------------------------------------------------------
 
-        if not torch.isfinite(
-            travel_time
-        ).all():
-
+        if not torch.isfinite(reconstructed_cube).all():
             raise RuntimeError(
-                "Travel-time output contains "
-                "NaN or Inf values."
+                "Reconstruction contains NaN or Inf values."
             )
 
-        # -------------------------------------------------
-        # Log-variance finite check
-        # -------------------------------------------------
-
-        if not torch.isfinite(
-            log_variance
-        ).all():
-
+        if not torch.isfinite(pressure_wavefield).all():
             raise RuntimeError(
-                "Log-variance output contains "
-                "NaN or Inf values."
+                "Pressure wavefield contains NaN or Inf values."
             )
 
-        # =================================================
-        # RETURN
-        # =================================================
-        #
-        # The three-output interface is deliberately kept
-        # consistent throughout training and inference.
-        #
-        # =================================================
+        if not torch.isfinite(log_variance).all():
+            raise RuntimeError(
+                "Log variance contains NaN or Inf values."
+            )
 
         return (
             reconstructed_cube,
-            travel_time,
-            log_variance
+            pressure_wavefield,
+            log_variance,
         )

@@ -8,54 +8,32 @@ with Predictive Uncertainty for Seismic Data Reconstruction
 
 Purpose
 -------
-
-Generate publication-quality reconstruction figures for the
-trained Physics-Informed 3D Encoder-Decoder model.
+Generate publication-quality reconstruction figures for the trained
+acoustic-wave-equation synthetic seismic reconstruction model.
 
 Each figure contains five panels:
-
     1. Input / Corrupted Data
     2. Ground Truth
     3. Reconstructed Data
     4. Absolute Reconstruction Error
     5. Predictive Uncertainty
 
-Predictive uncertainty is obtained from:
+Predictive variance:
+    predictive variance = aleatoric variance + epistemic variance
 
-    Aleatoric uncertainty
-        +
-    Epistemic uncertainty from MC Dropout
-
-The final predictive variance is:
-
-    predictive variance
-        =
-    aleatoric variance
-        +
-    epistemic variance
-
-The predictive standard deviation is:
-
-    predictive std
-        =
-    sqrt(predictive variance)
+Predictive standard deviation:
+    predictive std = sqrt(predictive variance)
 
 Important
 ---------
-
-The trained model is NOT retrained during gallery generation.
-
-The trained checkpoint:
-
-    best_model.pth
-
-is loaded once and evaluated using the configured dataset.
-
-MC Dropout is used to obtain stochastic reconstruction
-predictions and stochastic log-variance predictions.
-
-Observed seismic samples are restored exactly after
-reconstruction to guarantee data consistency.
+- The trained model is not retrained during gallery generation.
+- The checkpoint is loaded once.
+- MC Dropout stores reconstruction and log-variance samples only.
+- Pressure-wavefield samples are not retained by default because
+  their memory requirements are substantial.
+- Observed seismic samples are restored exactly after reconstruction.
+- Acoustic pressure-wavefield output is retained in the model interface.
+  It is not confused with Eikonal travel time.
 
 Author:
 Ormin Joseph
@@ -78,19 +56,14 @@ import matplotlib.pyplot as plt
 # =====================================================================
 
 from dataset.build_dataset import build_dataset
-
 from models.network import Network3D
-
 from models.mc_dropout import MCDropout3D
 
 from models.predictive_uncertainty import (
     PredictiveUncertaintyEstimator
 )
 
-
-# =====================================================================
-# CONFIGURATION IMPORTS
-# =====================================================================
+from utils import config
 
 from utils.config import (
     EXPERIMENT_NAME,
@@ -112,32 +85,16 @@ from utils.config import (
 # GLOBAL SETTINGS
 # =====================================================================
 
-# Output directory for the reconstruction gallery.
-GALLERY_DIR = (
-    Path(REPORT_DIR)
-    / "gallery"
-)
+GALLERY_DIR = Path(REPORT_DIR) / "gallery"
 
-# Trained model checkpoint.
 CHECKPOINT_FILE = (
-    Path(CHECKPOINT_DIR)
-    / "best_model.pth"
+    Path(CHECKPOINT_DIR) / "best_model.pth"
 )
 
-# Number of decimal places used in diagnostic output.
-DISPLAY_DECIMALS = 6
-
-# Figure resolution.
 FIGURE_DPI = 300
 
-# Slice axis.
-#
-# For the seismic tensor:
-#
-#     [C, D, H, W]
-#
-# axis 0 after selecting the channel corresponds to depth.
-#
+# Slice axis for a volume represented as [D, H, W].
+# 0 = depth slices; 1 = H-axis slices; 2 = W-axis slices.
 SLICE_AXIS = 0
 
 
@@ -146,72 +103,25 @@ SLICE_AXIS = 0
 # =====================================================================
 
 def resolve_device():
-    """
-    Resolve the configured device.
+    """Resolve DEVICE values: auto, cpu or cuda."""
 
-    Configuration options:
-
-        "auto"
-        "cpu"
-        "cuda"
-
-    Returns
-    -------
-
-    torch.device
-        Actual device used for inference.
-    """
-
-    configured_device = str(
-        DEVICE
-    ).strip().lower()
-
-    # ---------------------------------------------------------------
-    # Automatic device selection.
-    # ---------------------------------------------------------------
+    configured_device = str(DEVICE).strip().lower()
 
     if configured_device == "auto":
-
-        if torch.cuda.is_available():
-
-            return torch.device(
-                "cuda"
-            )
-
         return torch.device(
-            "cpu"
+            "cuda" if torch.cuda.is_available() else "cpu"
         )
-
-    # ---------------------------------------------------------------
-    # Explicit CPU.
-    # ---------------------------------------------------------------
 
     if configured_device == "cpu":
-
-        return torch.device(
-            "cpu"
-        )
-
-    # ---------------------------------------------------------------
-    # Explicit CUDA.
-    # ---------------------------------------------------------------
+        return torch.device("cpu")
 
     if configured_device == "cuda":
-
         if not torch.cuda.is_available():
-
             raise RuntimeError(
-                "DEVICE is configured as 'cuda', "
-                "but CUDA is not available."
+                "DEVICE is configured as 'cuda', but CUDA is "
+                "not available in this environment."
             )
-
-        return torch.device(
-            "cuda"
-        )
-
-    # ---------------------------------------------------------------
-    # Unsupported device.
-    # ---------------------------------------------------------------
+        return torch.device("cuda")
 
     raise ValueError(
         f"Unsupported DEVICE configuration: {DEVICE}"
@@ -222,261 +132,136 @@ def resolve_device():
 # TENSOR VALIDATION
 # =====================================================================
 
-def validate_tensor(
-    tensor,
-    name,
-    expected_ndim=None
-):
-    """
-    Validate a tensor before reconstruction processing.
+def validate_tensor(tensor, name, expected_ndim=None):
+    """Check tensor type, optional dimensionality and finite values."""
 
-    Parameters
-    ----------
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor.")
 
-    tensor : torch.Tensor
-        Tensor to validate.
-
-    name : str
-        Human-readable tensor name.
-
-    expected_ndim : int, optional
-        Expected number of dimensions.
-    """
-
-    if not isinstance(
-        tensor,
-        torch.Tensor
-    ):
-
-        raise TypeError(
-            f"{name} must be a torch.Tensor."
-        )
-
-    if expected_ndim is not None:
-
-        if tensor.ndim != expected_ndim:
-
-            raise ValueError(
-                f"{name} must have "
-                f"{expected_ndim} dimensions. "
-                f"Received {tuple(tensor.shape)}."
-            )
-
-    if not torch.isfinite(
-        tensor
-    ).all():
-
+    if expected_ndim is not None and tensor.ndim != expected_ndim:
         raise ValueError(
-            f"{name} contains NaN or Inf values."
+            f"{name} must have {expected_ndim} dimensions; "
+            f"received shape {tuple(tensor.shape)}."
         )
+
+    if not torch.isfinite(tensor).all().item():
+        raise ValueError(f"{name} contains NaN or Inf values.")
 
 
 # =====================================================================
 # CONVERT TENSOR TO NUMPY
 # =====================================================================
 
-def tensor_to_numpy(
-    tensor
-):
-    """
-    Convert a tensor to a NumPy array.
+def tensor_to_numpy(tensor):
+    """Detach a tensor and convert it to a CPU NumPy array."""
 
-    Expected final form:
-
-        [D,H,W]
-
-    or:
-
-        [H,W]
-    """
-
-    if isinstance(
-        tensor,
-        torch.Tensor
-    ):
-
+    if isinstance(tensor, torch.Tensor):
         tensor = tensor.detach().cpu()
 
-    return tensor.numpy()
+    if not isinstance(tensor, np.ndarray):
+        raise TypeError(
+            "Expected a torch.Tensor or numpy.ndarray."
+        )
+
+    return tensor
 
 
 # =====================================================================
 # EXTRACT DATASET SAMPLE
 # =====================================================================
 
-def extract_dataset_sample(
-    sample
-):
+def extract_dataset_sample(sample):
     """
-    Extract corrupted input, ground truth and mask.
-
-    Expected dataset convention:
-
+    Dataset convention:
         sample[0] = corrupted seismic input
-        sample[1] = ground truth
+        sample[1] = ground-truth seismic volume
         sample[2] = observation mask
     """
 
-    if not isinstance(
-        sample,
-        (tuple, list)
-    ):
-
+    if not isinstance(sample, (tuple, list)):
         raise TypeError(
             "Dataset sample must be a tuple or list."
         )
 
     if len(sample) < 3:
-
         raise ValueError(
-            "Dataset sample must contain at least "
-            "input, target and mask."
+            "Dataset sample must contain input, target and mask."
         )
 
-    corrupted = sample[0]
-
-    target = sample[1]
-
-    mask = sample[2]
-
-    return (
-        corrupted,
-        target,
-        mask
-    )
+    return sample[0], sample[1], sample[2]
 
 
 # =====================================================================
 # PREPARE MODEL INPUT
 # =====================================================================
 
-def prepare_model_input(
-    tensor,
-    device
-):
+def prepare_model_input(tensor, device):
     """
-    Convert seismic tensor to model input format.
+    Accepted shapes:
+        [C, D, H, W]
+        [B, C, D, H, W]
 
-    Accepted input:
-
-        [C,D,H,W]
-
-    or:
-
-        [B,C,D,H,W]
-
-    Returned tensor:
-
-        [B,C,D,H,W]
+    Returned shape:
+        [B, C, D, H, W]
     """
 
-    validate_tensor(
-        tensor,
-        "model input"
-    )
+    if not isinstance(tensor, torch.Tensor):
+        tensor = torch.as_tensor(tensor)
 
-    # ---------------------------------------------------------------
-    # Add batch dimension when necessary.
-    # ---------------------------------------------------------------
+    validate_tensor(tensor, "model input")
 
     if tensor.ndim == 4:
-
-        tensor = tensor.unsqueeze(
-            0
-        )
-
+        tensor = tensor.unsqueeze(0)
     elif tensor.ndim != 5:
-
         raise ValueError(
-            "Model input must have shape "
-            "[C,D,H,W] or [B,C,D,H,W]. "
+            "Model input must have shape [C,D,H,W] or "
+            "[B,C,D,H,W]. "
             f"Received {tuple(tensor.shape)}."
         )
 
-    return tensor.to(
-        device=device,
-        dtype=torch.float32
-    )
+    tensor = tensor.to(device=device, dtype=torch.float32)
+
+    validate_tensor(tensor, "prepared model input")
+
+    return tensor
 
 
 # =====================================================================
-# PREPARE MASK
+# PREPARE OBSERVATION MASK
 # =====================================================================
 
-def prepare_mask(
-    mask,
-    device
-):
+def prepare_mask(mask, device):
     """
-    Convert observation mask to:
+    Convert an observation mask to [B,C,D,H,W].
 
-        [B,C,D,H,W]
+    Convention:
+        1 = observed
+        0 = missing
     """
 
-    validate_tensor(
-        mask,
-        "observation mask"
-    )
+    if not isinstance(mask, torch.Tensor):
+        mask = torch.as_tensor(mask)
 
-    # ---------------------------------------------------------------
-    # Add batch dimension if required.
-    # ---------------------------------------------------------------
+    validate_tensor(mask, "observation mask")
 
     if mask.ndim == 4:
-
-        mask = mask.unsqueeze(
-            0
-        )
-
+        mask = mask.unsqueeze(0)
     elif mask.ndim != 5:
-
         raise ValueError(
-            "Mask must have shape "
-            "[C,D,H,W] or [B,C,D,H,W]. "
+            "Mask must have shape [C,D,H,W] or [B,C,D,H,W]. "
             f"Received {tuple(mask.shape)}."
         )
 
-    # ---------------------------------------------------------------
-    # Convert to floating point.
-    # ---------------------------------------------------------------
+    mask = mask.to(device=device, dtype=torch.float32)
 
-    mask = mask.to(
-        device=device,
-        dtype=torch.float32
-    )
+    # Reject non-binary masks.
+    is_zero = torch.isclose(mask, torch.zeros_like(mask))
+    is_one = torch.isclose(mask, torch.ones_like(mask))
 
-    # ---------------------------------------------------------------
-    # Verify that the mask is binary.
-    # ---------------------------------------------------------------
-
-    unique_values = torch.unique(
-        mask
-    )
-
-    for value in unique_values:
-
-        if not (
-            torch.isclose(
-                value,
-                torch.tensor(
-                    0.0,
-                    device=value.device
-                )
-            )
-            or
-            torch.isclose(
-                value,
-                torch.tensor(
-                    1.0,
-                    device=value.device
-                )
-            )
-        ):
-
-            raise ValueError(
-                "Observation mask must contain only "
-                "0 and 1 values."
-            )
+    if not torch.all(is_zero | is_one).item():
+        raise ValueError(
+            "Observation mask must contain only binary 0 and 1 values."
+        )
 
     return mask
 
@@ -491,71 +276,28 @@ def enforce_observed_data_consistency(
     mask
 ):
     """
-    Restore observed seismic samples exactly.
+    Restore the original observed values exactly.
 
-    Convention:
-
-        mask = 1 -> observed
-        mask = 0 -> missing
-
-    Therefore:
-
-        reconstruction =
-            reconstruction * (1-mask)
-            +
-            corrupted * mask
+    reconstruction_projected =
+        reconstruction * (1 - mask) + corrupted * mask
     """
 
-    validate_tensor(
-        reconstruction,
-        "reconstruction"
-    )
+    validate_tensor(reconstruction, "reconstruction")
+    validate_tensor(corrupted, "corrupted input")
+    validate_tensor(mask, "observation mask")
 
-    validate_tensor(
-        corrupted,
-        "corrupted"
-    )
-
-    validate_tensor(
-        mask,
-        "mask"
-    )
-
-    if (
-        reconstruction.shape
-        !=
-        corrupted.shape
-    ):
-
+    if reconstruction.shape != corrupted.shape:
         raise ValueError(
-            "Reconstruction and corrupted input "
-            "must have identical shapes."
+            "Reconstruction and corrupted input must have identical "
+            "shapes."
         )
 
-    if (
-        reconstruction.shape
-        !=
-        mask.shape
-    ):
-
+    if reconstruction.shape != mask.shape:
         raise ValueError(
-            "Reconstruction and mask "
-            "must have identical shapes."
+            "Reconstruction and mask must have identical shapes."
         )
 
-    # ---------------------------------------------------------------
-    # Projection onto the observed-data constraint.
-    # ---------------------------------------------------------------
-
-    projected = (
-        reconstruction
-        * (1.0 - mask)
-        +
-        corrupted
-        * mask
-    )
-
-    return projected
+    return reconstruction * (1.0 - mask) + corrupted * mask
 
 
 # =====================================================================
@@ -567,88 +309,55 @@ def calculate_observed_preservation_error(
     corrupted,
     mask
 ):
-    """
-    Calculate maximum absolute error on observed samples.
-
-    A correctly projected reconstruction should produce:
-
-        approximately 0
-
-    """
+    """Calculate the maximum absolute error at observed positions."""
 
     observed_difference = (
-        torch.abs(
-            reconstruction
-            -
-            corrupted
-        )
-        * mask
+        torch.abs(reconstruction - corrupted) * mask
     )
 
-    return float(
-        observed_difference.max().item()
-    )
+    return float(observed_difference.max().item())
 
 
 # =====================================================================
 # EXTRACT MC OUTPUTS
 # =====================================================================
 
-def extract_mc_outputs(
-    mc_results
-):
+def extract_mc_outputs(mc_results):
     """
-    Extract stochastic outputs from MCDropout3D.
+    Extract the stochastic reconstruction and log-variance samples.
 
-    Required keys:
-
-        reconstruction_samples
-        log_variance_samples
+    The gallery deliberately does not require pressure-wavefield samples.
     """
 
-    if not isinstance(
-        mc_results,
-        dict
-    ):
-
+    if not isinstance(mc_results, dict):
         raise TypeError(
             "MC Dropout prediction must return a dictionary."
         )
 
-    required_keys = [
+    required_keys = (
         "reconstruction_samples",
+        "log_variance_samples",
+    )
+
+    for key in required_keys:
+        if key not in mc_results:
+            raise KeyError(
+                f"MC Dropout output is missing required key: {key}"
+            )
+
+    reconstruction_samples = mc_results[
+        "reconstruction_samples"
+    ]
+
+    log_variance_samples = mc_results[
         "log_variance_samples"
     ]
 
-    for key in required_keys:
-
-        if key not in mc_results:
-
-            raise KeyError(
-                f"MC Dropout output is missing required key: "
-                f"{key}"
-            )
-
-    reconstruction_samples = (
-        mc_results[
-            "reconstruction_samples"
-        ]
-    )
-
-    log_variance_samples = (
-        mc_results[
-            "log_variance_samples"
-        ]
-    )
-
-    return (
-        reconstruction_samples,
-        log_variance_samples
-    )
+    return reconstruction_samples, log_variance_samples
 
 
 # =====================================================================
-# MC PREDICTION
+# MC PREDICTION AND UNCERTAINTY
 # =====================================================================
 
 @torch.no_grad()
@@ -660,365 +369,279 @@ def run_mc_prediction(
     device
 ):
     """
-    Run MC Dropout reconstruction and calculate
-    predictive uncertainty.
+    Run MC Dropout and calculate predictive uncertainty.
 
-    Returns
-    -------
+    Expected MC sample shapes:
+        [S, B, C, D, H, W]
 
-    dictionary containing:
+    Expected final volume shapes:
+        [B, C, D, H, W]
 
-        reconstruction
-        predictive_std
-        predictive_variance
-        aleatoric_variance
-        epistemic_variance
-        aleatoric_std
-        epistemic_std
-        reconstruction_samples
-        log_variance_samples
+    The acoustic pressure-wavefield samples are not stored by this
+    function. MCDropout3D is called with its default
+    store_pressure_wavefield_samples=False setting.
     """
 
-    # ================================================================
-    # CREATE MC DROPOUT ENGINE
-    # ================================================================
+    # ---------------------------------------------------------------
+    # Validate the input tensors.
+    # ---------------------------------------------------------------
+
+    validate_tensor(input_cube, "input_cube", expected_ndim=5)
+    validate_tensor(corrupted_cube, "corrupted_cube", expected_ndim=5)
+    validate_tensor(mask, "observation mask", expected_ndim=5)
+
+    if input_cube.shape != corrupted_cube.shape:
+        raise ValueError(
+            "input_cube and corrupted_cube must have identical shapes."
+        )
+
+    if input_cube.shape != mask.shape:
+        raise ValueError(
+            "input_cube and mask must have identical shapes."
+        )
+
+    # ---------------------------------------------------------------
+    # Run MC Dropout.
+    #
+    # Do not set store_pressure_wavefield_samples=True here.
+    # The pressure wavefield is not required for the five-panel
+    # reconstruction gallery.
+    # ---------------------------------------------------------------
 
     mc_predictor = MCDropout3D(
         model=model,
-        num_samples=MC_DROPOUT_SAMPLES
+        num_samples=MC_DROPOUT_SAMPLES,
     )
 
-    # ================================================================
-    # RUN MC DROPOUT
-    # ================================================================
+    mc_results = mc_predictor.predict(input_cube)
 
-    mc_results = mc_predictor.predict(
-        input_cube
+    reconstruction_samples, log_variance_samples = (
+        extract_mc_outputs(mc_results)
     )
 
-    # ================================================================
-    # EXTRACT STOCHASTIC OUTPUTS
-    # ================================================================
-
-    (
-        reconstruction_samples,
-        log_variance_samples
-    ) = extract_mc_outputs(
-        mc_results
-    )
-
-    # ================================================================
-    # VALIDATE MC OUTPUTS
-    # ================================================================
+    # ---------------------------------------------------------------
+    # Validate the MC samples.
+    #
+    # The first dimension represents MC samples:
+    # [S, B, C, D, H, W].
+    # ---------------------------------------------------------------
 
     validate_tensor(
         reconstruction_samples,
         "reconstruction_samples",
-        expected_ndim=6
+        expected_ndim=6,
     )
 
     validate_tensor(
         log_variance_samples,
         "log_variance_samples",
-        expected_ndim=6
+        expected_ndim=6,
     )
 
-    if (
-        reconstruction_samples.shape
-        !=
-        log_variance_samples.shape
-    ):
-
+    if reconstruction_samples.shape != log_variance_samples.shape:
         raise ValueError(
-            "Reconstruction samples and log-variance "
-            "samples must have identical shapes."
+            "Reconstruction samples and log-variance samples must "
+            "have identical shapes."
         )
 
-    # ================================================================
-    # MEAN RECONSTRUCTION
-    # ================================================================
-
-    reconstruction_mean = (
-        reconstruction_samples.mean(
-            dim=0
+    if reconstruction_samples.shape[0] != MC_DROPOUT_SAMPLES:
+        raise ValueError(
+            "The number of returned reconstruction samples does not "
+            "match MC_DROPOUT_SAMPLES. "
+            f"Expected {MC_DROPOUT_SAMPLES}; "
+            f"received {reconstruction_samples.shape[0]}."
         )
-    )
 
-    # ================================================================
-    # PREDICTIVE UNCERTAINTY ESTIMATOR
-    # ================================================================
+    if reconstruction_samples.shape[1:] != input_cube.shape:
+        raise ValueError(
+            "MC reconstruction sample dimensions do not match the "
+            "input dimensions. "
+            f"Samples: {tuple(reconstruction_samples.shape)}; "
+            f"input: {tuple(input_cube.shape)}."
+        )
+
+    # ---------------------------------------------------------------
+    # Calculate the mean reconstruction.
+    # ---------------------------------------------------------------
+
+    reconstruction_mean = reconstruction_samples.mean(dim=0)
+
+    # ---------------------------------------------------------------
+    # Estimate aleatoric and epistemic uncertainty.
     #
-    # IMPORTANT:
+    # The estimator receives stochastic log-variance and reconstruction
+    # samples. Its returned variance/std tensors should correspond to
+    # the volume shape [B,C,D,H,W].
+    # ---------------------------------------------------------------
+
+    uncertainty_estimator = PredictiveUncertaintyEstimator(
+        min_log_variance=LOG_VARIANCE_MIN,
+        max_log_variance=LOG_VARIANCE_MAX,
+    ).to(device)
+
+    uncertainty_results = uncertainty_estimator(
+        log_variance_samples,
+        reconstruction_samples,
+    )
+
+    required_uncertainty_keys = (
+        "aleatoric_variance",
+        "epistemic_variance",
+        "predictive_variance",
+        "aleatoric_std",
+        "epistemic_std",
+        "predictive_std",
+    )
+
+    for key in required_uncertainty_keys:
+        if key not in uncertainty_results:
+            raise KeyError(
+                "PredictiveUncertaintyEstimator output is missing "
+                f"required key: {key}"
+            )
+
+    aleatoric_variance = uncertainty_results["aleatoric_variance"]
+    epistemic_variance = uncertainty_results["epistemic_variance"]
+    predictive_variance = uncertainty_results["predictive_variance"]
+
+    aleatoric_std = uncertainty_results["aleatoric_std"]
+    epistemic_std = uncertainty_results["epistemic_std"]
+    predictive_std = uncertainty_results["predictive_std"]
+
+    # ---------------------------------------------------------------
+    # Validate uncertainty outputs.
     #
-    # PredictiveUncertaintyEstimator is an nn.Module.
-    #
-    # Its uncertainty methods are instance methods.
-    #
-    # Therefore we instantiate the estimator and call it through
-    # its forward() method.
-    #
-    # ================================================================
+    # All these tensors must be reduced over the MC sample dimension
+    # and match the reconstruction volume dimensions.
+    # ---------------------------------------------------------------
 
-    uncertainty_estimator = (
-        PredictiveUncertaintyEstimator(
-            min_log_variance=LOG_VARIANCE_MIN,
-            max_log_variance=LOG_VARIANCE_MAX
-        )
-    )
+    expected_volume_shape = reconstruction_mean.shape
 
-    uncertainty_estimator = (
-        uncertainty_estimator.to(
-            device
-        )
-    )
+    uncertainty_tensors = {
+        "aleatoric_variance": aleatoric_variance,
+        "epistemic_variance": epistemic_variance,
+        "predictive_variance": predictive_variance,
+        "aleatoric_std": aleatoric_std,
+        "epistemic_std": epistemic_std,
+        "predictive_std": predictive_std,
+    }
 
-    # ================================================================
-    # COMPLETE UNCERTAINTY DECOMPOSITION
-    # ================================================================
+    for name, tensor in uncertainty_tensors.items():
+        validate_tensor(tensor, name)
 
-    uncertainty_results = (
-        uncertainty_estimator(
-            log_variance_samples,
-            reconstruction_samples
-        )
-    )
+        if tensor.shape != expected_volume_shape:
+            raise ValueError(
+                f"{name} must have shape "
+                f"{tuple(expected_volume_shape)}; "
+                f"received {tuple(tensor.shape)}. "
+                "Check PredictiveUncertaintyEstimator's output "
+                "dimensions and MC sample reduction."
+            )
 
-    # ================================================================
-    # EXTRACT UNCERTAINTY COMPONENTS
-    # ================================================================
-
-    aleatoric_variance = (
-        uncertainty_results[
-            "aleatoric_variance"
-        ]
-    )
-
-    epistemic_variance = (
-        uncertainty_results[
-            "epistemic_variance"
-        ]
-    )
-
-    predictive_variance = (
-        uncertainty_results[
-            "predictive_variance"
-        ]
-    )
-
-    aleatoric_std = (
-        uncertainty_results[
-            "aleatoric_std"
-        ]
-    )
-
-    epistemic_std = (
-        uncertainty_results[
-            "epistemic_std"
-        ]
-    )
-
-    predictive_std = (
-        uncertainty_results[
-            "predictive_std"
-        ]
-    )
-
-    # ================================================================
-    # ENFORCE OBSERVED-DATA CONSISTENCY
-    # ================================================================
-
-    reconstruction = (
-        enforce_observed_data_consistency(
-            reconstruction_mean,
-            corrupted_cube,
-            mask
-        )
-    )
-
-    # ================================================================
-    # OBSERVED-DATA PRESERVATION ERROR
-    # ================================================================
-
-    observed_error = (
-        calculate_observed_preservation_error(
-            reconstruction,
-            corrupted_cube,
-            mask
-        )
-    )
-
-    # ================================================================
-    # VALIDATE DATA CONSISTENCY
-    # ================================================================
-
-    if (
-        observed_error
-        >
-        OBSERVED_PRESERVATION_TOLERANCE
+    # Variances and standard deviations should not be negative.
+    for name, tensor in (
+        ("aleatoric_variance", aleatoric_variance),
+        ("epistemic_variance", epistemic_variance),
+        ("predictive_variance", predictive_variance),
+        ("aleatoric_std", aleatoric_std),
+        ("epistemic_std", epistemic_std),
+        ("predictive_std", predictive_std),
     ):
+        if torch.any(tensor < 0).item():
+            raise ValueError(
+                f"{name} contains negative values."
+            )
 
+    # ---------------------------------------------------------------
+    # Enforce observed-data consistency on the mean reconstruction.
+    #
+    # This projection changes the final reconstruction at observed
+    # positions but does not silently change the uncertainty estimates.
+    # ---------------------------------------------------------------
+
+    reconstruction = enforce_observed_data_consistency(
+        reconstruction_mean,
+        corrupted_cube,
+        mask,
+    )
+
+    # ---------------------------------------------------------------
+    # Verify observed-data preservation.
+    # ---------------------------------------------------------------
+
+    observed_error = calculate_observed_preservation_error(
+        reconstruction,
+        corrupted_cube,
+        mask,
+    )
+
+    if observed_error > OBSERVED_PRESERVATION_TOLERANCE:
         raise RuntimeError(
-            "Observed-data preservation error exceeds "
-            "the configured tolerance. "
-            f"Error = {observed_error:.12e}, "
-            f"Tolerance = "
-            f"{OBSERVED_PRESERVATION_TOLERANCE:.12e}"
+            "Observed-data preservation error exceeds the configured "
+            "tolerance. "
+            f"Error = {observed_error:.12e}; "
+            f"tolerance = {OBSERVED_PRESERVATION_TOLERANCE:.12e}."
         )
 
-    # ================================================================
-    # RETURN COMPLETE RESULTS
-    # ================================================================
+    # ---------------------------------------------------------------
+    # Return results.
+    # ---------------------------------------------------------------
 
     return {
         "reconstruction": reconstruction,
-
         "predictive_std": predictive_std,
-
         "predictive_variance": predictive_variance,
-
         "aleatoric_variance": aleatoric_variance,
-
         "epistemic_variance": epistemic_variance,
-
         "aleatoric_std": aleatoric_std,
-
         "epistemic_std": epistemic_std,
-
-        "reconstruction_samples": (
-            reconstruction_samples
-        ),
-
-        "log_variance_samples": (
-            log_variance_samples
-        ),
-
-        "observed_preservation_error": (
-            observed_error
-        )
+        "reconstruction_samples": reconstruction_samples,
+        "log_variance_samples": log_variance_samples,
+        "observed_preservation_error": observed_error,
     }
+
 
 # =====================================================================
 # PREPARE VISUALIZATION SLICE
 # =====================================================================
 
-def prepare_visualization_slice(
-    data,
-    slice_index
-):
+def prepare_visualization_slice(data, slice_index):
     """
-    Extract a 2D seismic slice from a 3D volume.
+    Extract a 2D slice from a 3D volume [D,H,W].
 
-    Parameters
-    ----------
-    data : torch.Tensor or numpy.ndarray
-        Seismic volume.
-
-        Expected shape after removing singleton dimensions:
-
-            [D,H,W]
-
-    slice_index : int
-        Index of the slice to extract.
-
-    Returns
-    -------
-    numpy.ndarray
-        2D visualization slice.
+    SLICE_AXIS:
+        0 = [H,W] at a selected depth index
+        1 = [D,W] at a selected H index
+        2 = [D,H] at a selected W index
     """
 
-    # ================================================================
-    # HANDLE PYTORCH TENSOR
-    # ================================================================
-
-    if isinstance(
-        data,
-        torch.Tensor
-    ):
-
-        array = (
-            data.detach()
-            .cpu()
-            .numpy()
-        )
-
-    # ================================================================
-    # HANDLE NUMPY ARRAY
-    # ================================================================
-
-    elif isinstance(
-        data,
-        np.ndarray
-    ):
-
-        array = data
-
-    # ================================================================
-    # UNSUPPORTED TYPE
-    # ================================================================
-
-    else:
-
-        raise TypeError(
-            "Visualization data must be either "
-            "torch.Tensor or numpy.ndarray. "
-            f"Received: {type(data)}"
-        )
-
-    # ================================================================
-    # REMOVE SINGLETON DIMENSIONS
-    # ================================================================
-
-    array = np.squeeze(
-        array
-    )
-
-    # ================================================================
-    # VERIFY 3D VOLUME
-    # ================================================================
+    array = tensor_to_numpy(data)
+    array = np.squeeze(array)
 
     if array.ndim != 3:
-
         raise ValueError(
-            "Visualization data must represent "
-            "a 3D seismic volume after squeezing. "
-            f"Received shape: {array.shape}"
+            "Visualization data must be a 3D volume after squeezing. "
+            f"Received shape: {array.shape}."
         )
 
-    # ================================================================
-    # EXTRACT REQUESTED SLICE
-    # ================================================================
+    if SLICE_AXIS not in (0, 1, 2):
+        raise ValueError(
+            f"Unsupported SLICE_AXIS: {SLICE_AXIS}"
+        )
+
+    if not 0 <= slice_index < array.shape[SLICE_AXIS]:
+        raise IndexError(
+            f"Slice index {slice_index} is invalid for axis "
+            f"{SLICE_AXIS} with size {array.shape[SLICE_AXIS]}."
+        )
 
     if SLICE_AXIS == 0:
+        return array[slice_index, :, :]
 
-        return array[
-            slice_index,
-            :,
-            :
-        ]
+    if SLICE_AXIS == 1:
+        return array[:, slice_index, :]
 
-    elif SLICE_AXIS == 1:
-
-        return array[
-            :,
-            slice_index,
-            :
-        ]
-
-    elif SLICE_AXIS == 2:
-
-        return array[
-            :,
-            :,
-            slice_index
-        ]
-
-    # ================================================================
-    # INVALID SLICE AXIS
-    # ================================================================
-
-    raise ValueError(
-        f"Unsupported SLICE_AXIS: {SLICE_AXIS}"
-    )
+    return array[:, :, slice_index]
 
 
 # =====================================================================
@@ -1030,284 +653,114 @@ def create_gallery_figure(
     target,
     reconstruction,
     predictive_std,
-    sample_index
+    sample_index,
 ):
-    """
-    Create the five-panel reconstruction gallery.
+    """Create the five-panel reconstruction and uncertainty figure."""
 
-    Panels:
-
-        1. Input / Corrupted Data
-        2. Ground Truth
-        3. Reconstruction
-        4. Absolute Error
-        5. Predictive Uncertainty
-    """
-
-    # ================================================================
-    # CONVERT VOLUMES
-    # ================================================================
-
-    corrupted_array = np.squeeze(
-        tensor_to_numpy(
-            corrupted
-        )
-    )
-
-    target_array = np.squeeze(
-        tensor_to_numpy(
-            target
-        )
-    )
-
-    reconstruction_array = np.squeeze(
-        tensor_to_numpy(
-            reconstruction
-        )
-    )
-
-    uncertainty_array = np.squeeze(
-        tensor_to_numpy(
-            predictive_std
-        )
-    )
-
-    # ================================================================
-    # VALIDATE VOLUME DIMENSIONS
-    # ================================================================
-
-    for name, array in [
-        (
-            "corrupted",
-            corrupted_array
+    # Convert [B,C,D,H,W] or [C,D,H,W] to [D,H,W].
+    volumes = {
+        "corrupted": np.squeeze(tensor_to_numpy(corrupted)),
+        "target": np.squeeze(tensor_to_numpy(target)),
+        "reconstruction": np.squeeze(
+            tensor_to_numpy(reconstruction)
         ),
-        (
-            "target",
-            target_array
+        "predictive_std": np.squeeze(
+            tensor_to_numpy(predictive_std)
         ),
-        (
-            "reconstruction",
-            reconstruction_array
-        ),
-        (
-            "predictive_std",
-            uncertainty_array
-        )
-    ]:
+    }
 
+    for name, array in volumes.items():
         if array.ndim != 3:
-
             raise ValueError(
-                f"{name} must be a 3D volume. "
-                f"Received {array.shape}."
+                f"{name} must be a 3D volume after squeezing. "
+                f"Received shape {array.shape}."
             )
 
-    # ================================================================
-    # CALCULATE ABSOLUTE ERROR
-    # ================================================================
+    reference_shape = volumes["target"].shape
 
+    for name, array in volumes.items():
+        if array.shape != reference_shape:
+            raise ValueError(
+                f"{name} shape {array.shape} does not match target "
+                f"shape {reference_shape}."
+            )
+
+    # Calculate absolute reconstruction error.
     absolute_error = np.abs(
-        target_array
-        -
-        reconstruction_array
+        volumes["target"] - volumes["reconstruction"]
     )
 
-    # ================================================================
-    # SELECT CENTRAL SLICE
-    # ================================================================
+    # Choose the central slice along the selected axis.
+    slice_index = reference_shape[SLICE_AXIS] // 2
 
-    if SLICE_AXIS == 0:
-
-        slice_index = (
-            target_array.shape[0]
-            //
-            2
-        )
-
-    elif SLICE_AXIS == 1:
-
-        slice_index = (
-            target_array.shape[1]
-            //
-            2
-        )
-
-    else:
-
-        slice_index = (
-            target_array.shape[2]
-            //
-            2
-        )
-
-    corrupted_slice = (
-        prepare_visualization_slice(
-            corrupted_array,
-            slice_index
-        )
+    corrupted_slice = prepare_visualization_slice(
+        volumes["corrupted"], slice_index
+    )
+    target_slice = prepare_visualization_slice(
+        volumes["target"], slice_index
+    )
+    reconstruction_slice = prepare_visualization_slice(
+        volumes["reconstruction"], slice_index
+    )
+    error_slice = prepare_visualization_slice(
+        absolute_error, slice_index
+    )
+    uncertainty_slice = prepare_visualization_slice(
+        volumes["predictive_std"], slice_index
     )
 
-    target_slice = (
-        prepare_visualization_slice(
-            target_array,
-            slice_index
-        )
-    )
-
-    reconstruction_slice = (
-        prepare_visualization_slice(
-            reconstruction_array,
-            slice_index
-        )
-    )
-
-    error_slice = (
-        prepare_visualization_slice(
-            absolute_error,
-            slice_index
-        )
-    )
-
-    uncertainty_slice = (
-        prepare_visualization_slice(
-            uncertainty_array,
-            slice_index
-        )
-    )
-
-    # ================================================================
-    # CREATE FIGURE
-    # ================================================================
-
+    # Create five panels.
     figure, axes = plt.subplots(
         1,
         5,
-        figsize=(20, 4)
+        figsize=(20, 4),
     )
 
-    # ================================================================
-    # PANEL 1 — CORRUPTED INPUT
-    # ================================================================
+    panels = [
+        (
+            corrupted_slice,
+            "Input / Corrupted Data",
+            "gray",
+        ),
+        (
+            target_slice,
+            "Ground Truth",
+            "gray",
+        ),
+        (
+            reconstruction_slice,
+            "Reconstruction",
+            "gray",
+        ),
+        (
+            error_slice,
+            "Absolute Error",
+            "hot",
+        ),
+        (
+            uncertainty_slice,
+            "Predictive Uncertainty (Std.)",
+            "hot",
+        ),
+    ]
 
-    axes[0].imshow(
-        corrupted_slice,
-        cmap="gray",
-        aspect="auto"
-    )
-
-    axes[0].set_title(
-        "Input / Corrupted Data"
-    )
-
-    axes[0].set_xlabel(
-        "Spatial axis"
-    )
-
-    axes[0].set_ylabel(
-        "Depth"
-    )
-
-    # ================================================================
-    # PANEL 2 — GROUND TRUTH
-    # ================================================================
-
-    axes[1].imshow(
-        target_slice,
-        cmap="gray",
-        aspect="auto"
-    )
-
-    axes[1].set_title(
-        "Ground Truth"
-    )
-
-    axes[1].set_xlabel(
-        "Spatial axis"
-    )
-
-    axes[1].set_ylabel(
-        "Depth"
-    )
-
-    # ================================================================
-    # PANEL 3 — RECONSTRUCTION
-    # ================================================================
-
-    axes[2].imshow(
-        reconstruction_slice,
-        cmap="gray",
-        aspect="auto"
-    )
-
-    axes[2].set_title(
-        "Reconstruction"
-    )
-
-    axes[2].set_xlabel(
-        "Spatial axis"
-    )
-
-    axes[2].set_ylabel(
-        "Depth"
-    )
-
-    # ================================================================
-    # PANEL 4 — ABSOLUTE ERROR
-    # ================================================================
-
-    axes[3].imshow(
-        error_slice,
-        cmap="hot",
-        aspect="auto"
-    )
-
-    axes[3].set_title(
-        "Absolute Error"
-    )
-
-    axes[3].set_xlabel(
-        "Spatial axis"
-    )
-
-    axes[3].set_ylabel(
-        "Depth"
-    )
-
-    # ================================================================
-    # PANEL 5 — PREDICTIVE UNCERTAINTY
-    # ================================================================
-
-    axes[4].imshow(
-        uncertainty_slice,
-        cmap="hot",
-        aspect="auto"
-    )
-
-    axes[4].set_title(
-        "Predictive Uncertainty"
-    )
-
-    axes[4].set_xlabel(
-        "Spatial axis"
-    )
-
-    axes[4].set_ylabel(
-        "Depth"
-    )
-
-    # ================================================================
-    # MAIN FIGURE TITLE
-    # ================================================================
+    for axis, (image, title, cmap) in zip(axes, panels):
+        axis.imshow(
+            image,
+            cmap=cmap,
+            aspect="auto",
+        )
+        axis.set_title(title)
+        axis.set_xlabel("Spatial axis")
+        axis.set_ylabel(
+            "Depth" if SLICE_AXIS == 0 else "Spatial axis"
+        )
 
     figure.suptitle(
         "Physics-Informed 3D Seismic Reconstruction "
         f"— Sample {sample_index + 1}",
-        fontsize=14
+        fontsize=14,
     )
-
-    # ================================================================
-    # LAYOUT
-    # ================================================================
 
     figure.tight_layout()
 
@@ -1319,407 +772,233 @@ def create_gallery_figure(
 # =====================================================================
 
 def generate_gallery():
-    """
-    Generate the complete reconstruction gallery.
-    """
-
-    # ================================================================
-    # HEADER
-    # ================================================================
+    """Load the trained model and generate reconstruction figures."""
 
     print()
     print("=" * 70)
-    print(
-        "FINAL PhD RECONSTRUCTION GALLERY"
-    )
+    print("FINAL PhD RECONSTRUCTION GALLERY")
     print("=" * 70)
 
-    # ================================================================
-    # RESOLVE DEVICE
-    # ================================================================
+    # ---------------------------------------------------------------
+    # Resolve device.
+    # ---------------------------------------------------------------
 
     device = resolve_device()
 
-    print()
-    print(
-        f"Experiment       : "
-        f"{EXPERIMENT_NAME}"
-    )
+    print(f"\nExperiment       : {EXPERIMENT_NAME}")
+    print(f"Configured device: {DEVICE}")
+    print(f"Actual device    : {device}")
+    print(f"MC samples       : {MC_DROPOUT_SAMPLES}")
+    print(f"Gallery samples  : {GALLERY_NUMBER_OF_SAMPLES}")
 
-    print(
-        f"Configured device: "
-        f"{DEVICE}"
-    )
+    if MC_DROPOUT_SAMPLES <= 0:
+        raise ValueError(
+            "MC_DROPOUT_SAMPLES must be greater than zero."
+        )
 
-    print(
-        f"MC samples       : "
-        f"{MC_DROPOUT_SAMPLES}"
-    )
+    # ---------------------------------------------------------------
+    # Check checkpoint.
+    # ---------------------------------------------------------------
 
-    print(
-        f"Gallery samples  : "
-        f"{GALLERY_NUMBER_OF_SAMPLES}"
-    )
-
-    print(
-        f"Actual device    : "
-        f"{device}"
-    )
-
-    # ================================================================
-    # CHECKPOINT
-    # ================================================================
-
-    print()
-    print(
-        f"Checkpoint       : "
-        f"{CHECKPOINT_FILE}"
-    )
+    print(f"\nCheckpoint       : {CHECKPOINT_FILE}")
 
     if not CHECKPOINT_FILE.exists():
-
         raise FileNotFoundError(
             "The required checkpoint does not exist:\n"
             f"{CHECKPOINT_FILE}"
         )
 
-    # ================================================================
-    # BUILD DATASET
-    # ================================================================
+    # ---------------------------------------------------------------
+    # Build configured dataset.
+    # ---------------------------------------------------------------
 
-    print()
-    print(
-        "Building configured dataset..."
-    )
-
-    print()
-    print(
-        "============================================================"
-    )
-
-    print(
-        "BUILDING DATASET"
-    )
-
-    print(
-        "============================================================"
-    )
-
+    print("\nBuilding configured dataset...")
     dataset = build_dataset()
 
-    print()
-    print(
-        f"Dataset samples  : "
-        f"{len(dataset)}"
-    )
+    print(f"Dataset samples  : {len(dataset)}")
 
-    # ================================================================
-    # DETERMINE NUMBER OF GALLERY SAMPLES
-    # ================================================================
+    if len(dataset) <= 0:
+        raise ValueError(
+            "The configured dataset contains no samples."
+        )
 
     number_of_samples = min(
-        int(
-            GALLERY_NUMBER_OF_SAMPLES
-        ),
-        len(dataset)
+        int(GALLERY_NUMBER_OF_SAMPLES),
+        len(dataset),
     )
 
     if number_of_samples <= 0:
-
         raise ValueError(
             "GALLERY_NUMBER_OF_SAMPLES must be greater than zero."
         )
 
-    # ================================================================
-    # BUILD NETWORK
-    # ================================================================
+    # ---------------------------------------------------------------
+    # Build the trained network architecture.
+    #
+    # The pressure-wavefield output is configured using the acoustic
+    # time-step setting. Do not substitute an Eikonal travel-time
+    # output here.
+    # ---------------------------------------------------------------
 
-    print()
+    print("\nBuilding Network3D...")
+    print(f"Attention        : {USE_ATTENTION}")
+    print(f"Residual         : {USE_RESIDUAL}")
+    print(f"Uncertainty head : {USE_UNCERTAINTY}")
     print(
-        "Building Network3D..."
-    )
-
-    print(
-        f"Attention        : "
-        f"{USE_ATTENTION}"
-    )
-
-    print(
-        f"Residual         : "
-        f"{USE_RESIDUAL}"
-    )
-
-    print(
-        f"Uncertainty head : "
-        f"{USE_UNCERTAINTY}"
+        f"Acoustic time steps: {config.ACOUSTIC_TIME_STEPS}"
     )
 
     model = Network3D(
         use_attention=USE_ATTENTION,
         use_residual=USE_RESIDUAL,
-        use_uncertainty=USE_UNCERTAINTY
-    )
+        use_uncertainty=USE_UNCERTAINTY,
+        pressure_time_steps=config.ACOUSTIC_TIME_STEPS,
+    ).to(device)
 
-    model = model.to(
-        device
-    )
+    # ---------------------------------------------------------------
+    # Load checkpoint once.
+    # ---------------------------------------------------------------
 
-    # ================================================================
-    # LOAD CHECKPOINT
-    # ================================================================
-
-    print()
-    print(
-        "Loading best_model.pth..."
-    )
+    print("\nLoading best_model.pth...")
 
     checkpoint = torch.load(
         CHECKPOINT_FILE,
-        map_location=device
+        map_location=device,
     )
 
-    # ---------------------------------------------------------------
-    # Support checkpoint dictionaries containing model_state_dict.
-    # ---------------------------------------------------------------
-
-    if isinstance(
-        checkpoint,
-        dict
-    ) and (
-        "model_state_dict"
-        in checkpoint
+    if (
+        isinstance(checkpoint, dict)
+        and "model_state_dict" in checkpoint
     ):
-
-        state_dict = (
-            checkpoint[
-                "model_state_dict"
-            ]
-        )
-
+        state_dict = checkpoint["model_state_dict"]
     else:
-
         state_dict = checkpoint
 
-    model.load_state_dict(
-        state_dict
-    )
+    model.load_state_dict(state_dict)
+    model.eval()
 
-    print(
-        "Model loaded successfully."
-    )
+    print("Model loaded successfully.")
 
-    # ================================================================
-    # CREATE GALLERY DIRECTORY
-    # ================================================================
+    # ---------------------------------------------------------------
+    # Prepare output directory.
+    # ---------------------------------------------------------------
 
     GALLERY_DIR.mkdir(
         parents=True,
-        exist_ok=True
+        exist_ok=True,
     )
 
-    print()
-    print(
-        f"Gallery directory : "
-        f"{GALLERY_DIR}"
-    )
+    print(f"Gallery directory : {GALLERY_DIR}")
 
-    # ================================================================
-    # PROCESS SAMPLES
-    # ================================================================
+    # ---------------------------------------------------------------
+    # Process requested dataset samples.
+    # ---------------------------------------------------------------
 
-    for sample_index in range(
-        number_of_samples
-    ):
+    for sample_index in range(number_of_samples):
 
         print()
+        print("-" * 70)
         print(
-            "-" * 70
-        )
-
-        print(
-            f"Processing sample "
-            f"{sample_index + 1}/"
+            f"Processing sample {sample_index + 1}/"
             f"{number_of_samples}"
         )
+        print("-" * 70)
 
-        print(
-            "-" * 70
+        sample = dataset[sample_index]
+
+        corrupted, target, mask = extract_dataset_sample(sample)
+
+        corrupted_input = prepare_model_input(
+            corrupted, device
+        )
+        target_input = prepare_model_input(
+            target, device
+        )
+        observation_mask = prepare_mask(
+            mask, device
         )
 
-        # ------------------------------------------------------------
-        # Retrieve sample.
-        # ------------------------------------------------------------
-
-        sample = dataset[
-            sample_index
-        ]
-
-        (
-            corrupted,
-            target,
-            mask
-        ) = extract_dataset_sample(
-            sample
-        )
-
-        # ------------------------------------------------------------
-        # Prepare tensors.
-        # ------------------------------------------------------------
-
-        corrupted_input = (
-            prepare_model_input(
-                corrupted,
-                device
-            )
-        )
-
-        target_input = (
-            prepare_model_input(
-                target,
-                device
-            )
-        )
-
-        observation_mask = (
-            prepare_mask(
-                mask,
-                device
-            )
-        )
-
-        # ------------------------------------------------------------
-        # Validate shape consistency.
-        # ------------------------------------------------------------
-
-        if (
-            corrupted_input.shape
-            !=
-            target_input.shape
-        ):
-
+        # Verify that all volumes have identical shapes.
+        if corrupted_input.shape != target_input.shape:
             raise ValueError(
-                "Corrupted input and ground truth "
-                "must have identical shapes."
+                "Corrupted input and ground truth must have "
+                "identical shapes."
             )
 
-        if (
-            corrupted_input.shape
-            !=
-            observation_mask.shape
-        ):
-
+        if corrupted_input.shape != observation_mask.shape:
             raise ValueError(
-                "Corrupted input and observation mask "
-                "must have identical shapes."
+                "Corrupted input and observation mask must have "
+                "identical shapes."
             )
 
-        # ------------------------------------------------------------
-        # MC Dropout prediction.
-        # ------------------------------------------------------------
+        # -----------------------------------------------------------
+        # Run MC Dropout and calculate predictive uncertainty.
+        # -----------------------------------------------------------
 
         results = run_mc_prediction(
             model=model,
             input_cube=corrupted_input,
             mask=observation_mask,
             corrupted_cube=corrupted_input,
-            device=device
+            device=device,
         )
 
-        # ------------------------------------------------------------
-        # Extract final reconstruction.
-        # ------------------------------------------------------------
-
-        reconstruction = (
-            results[
-                "reconstruction"
-            ]
-        )
-
-        # ------------------------------------------------------------
-        # Extract predictive uncertainty.
-        # ------------------------------------------------------------
-
-        predictive_std = (
-            results[
-                "predictive_std"
-            ]
-        )
-
-        # ------------------------------------------------------------
-        # Report observed-data preservation.
-        # ------------------------------------------------------------
-
-        observed_error = (
-            results[
-                "observed_preservation_error"
-            ]
-        )
+        reconstruction = results["reconstruction"]
+        predictive_std = results["predictive_std"]
 
         print(
-            "Observed-data preservation "
-            f"error: "
-            f"{observed_error:.12e}"
+            "Observed-data preservation error: "
+            f"{results['observed_preservation_error']:.12e}"
         )
 
-        # ------------------------------------------------------------
-        # Create figure.
-        # ------------------------------------------------------------
+        # -----------------------------------------------------------
+        # Generate the five-panel figure.
+        # -----------------------------------------------------------
 
         figure = create_gallery_figure(
             corrupted=corrupted_input,
             target=target_input,
             reconstruction=reconstruction,
             predictive_std=predictive_std,
-            sample_index=sample_index
+            sample_index=sample_index,
         )
-
-        # ------------------------------------------------------------
-        # Save figure.
-        # ------------------------------------------------------------
 
         output_file = (
-            GALLERY_DIR
-            /
-            f"sample_{sample_index:03d}.png"
+            GALLERY_DIR / f"sample_{sample_index:03d}.png"
         )
 
-        figure.savefig(
-            output_file,
-            dpi=FIGURE_DPI,
-            bbox_inches="tight"
-        )
+        try:
+            figure.savefig(
+                output_file,
+                dpi=FIGURE_DPI,
+                bbox_inches="tight",
+            )
+        finally:
+            plt.close(figure)
 
-        plt.close(
-            figure
-        )
+        print(f"Saved: {output_file}")
 
-        print(
-            f"Saved: {output_file}"
-        )
+        # Explicitly release references to large sample tensors before
+        # moving on to the next gallery item.
+        del results
+        del reconstruction
+        del predictive_std
+        del corrupted_input
+        del target_input
+        del observation_mask
 
-    # ================================================================
-    # COMPLETION
-    # ================================================================
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    # ---------------------------------------------------------------
+    # Completion.
+    # ---------------------------------------------------------------
 
     print()
     print("=" * 70)
-
-    print(
-        "RECONSTRUCTION GALLERY COMPLETED SUCCESSFULLY"
-    )
-
+    print("RECONSTRUCTION GALLERY COMPLETED SUCCESSFULLY")
     print("=" * 70)
-
-    print()
-    print(
-        f"Output directory:"
-    )
-
-    print(
-        f"{GALLERY_DIR}"
-    )
-
-    print()
+    print(f"\nOutput directory:\n{GALLERY_DIR}\n")
 
 
 # =====================================================================
@@ -1727,5 +1006,4 @@ def generate_gallery():
 # =====================================================================
 
 if __name__ == "__main__":
-
     generate_gallery()
